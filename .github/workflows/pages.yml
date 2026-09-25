@@ -1,0 +1,60 @@
+name: pages
+
+# Builds the WebAssembly release (werkkzeug3_kkrieger/wasm/build.sh) and
+# publishes it on GitHub Pages as the online demo.
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.9
+          actions-cache-folder: emsdk-cache
+
+      - name: Build release
+        working-directory: werkkzeug3_kkrieger
+        run: KK_RELEASE=1 bash wasm/build.sh
+
+      - name: Prepare site
+        run: |
+          mkdir -p site
+          cp werkkzeug3_kkrieger/wasm/dist_release/* site/
+          cp site/kkrieger.html site/index.html
+          touch site/.nojekyll
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -7,6 +7,10 @@ own 2004 lighting.
 
 Port by MasonDye.
 
+**Play it online: https://masondye.github.io/kkrieger-wasm/** (built from
+`master` by the `pages` workflow; WebGL2 browser, generation takes a while on
+start).
+
 ---
 
 ## What this is
