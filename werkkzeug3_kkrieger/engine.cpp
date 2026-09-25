@@ -2805,7 +2805,11 @@ void Engine_::ProcessPortals(KEnvironment *kenv,KKriegerCell *observerCell)
   unitBox.Init(-1,-1,1,1);
 
   // process sector visibility
-  if(!observerCell || kkPaintAllSectors) // just paint everything
+#if defined(__EMSCRIPTEN__)
+  if(!observerCell || kkPaintAllSectors) // just paint everything (debug F11: always)
+#else
+  if(!observerCell) // just paint everything
+#endif
   {
     for(GenScene *job=SectorJobs;job;job=job->Next)
     {

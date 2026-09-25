@@ -20,6 +20,11 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Install the VC++ 2010 runtime
+        # yasm-1.3.0/yasm.exe links MSVCR100.dll, which current runner images
+        # no longer carry (the assembler step failed with 0xC0000135)
+        run: choco install vcredist2010 --no-progress -y
+
       - name: Build Werkkzeug
         run: |
           $env:Path += ";" + $pwd.Path + "\yasm-1.3.0\;";
