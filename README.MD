@@ -5,15 +5,11 @@
 WebAssembly / WebGL2 and playing the **original Breakpoint 2004 beta** with its
 own 2004 lighting.
 
-**浏览器里的 .kkrieger**：把 .theprodukkt（farbrausch）那款 96 KB 的第一人称射击游戏移植到
-WebAssembly / WebGL2，运行的是 **2004 年 Breakpoint 发布的原版 beta 数据**，并按原版的 2004
-渲染方式还原了光照与阴影。
-
 Port by MasonDye.
 
 ---
 
-## What this is / 这是什么
+## What this is
 
 * The whole game — procedural texture/mesh generation, the V2 synthesizer for
   music and sound, the game logic and the renderer — compiled with Emscripten.
@@ -30,17 +26,7 @@ Port by MasonDye.
   table. Recorded frames of the original (run under Wine) and of the port
   match stage by stage.
 
-中文简介：
-
-* 整个游戏（程序化生成贴图与模型、V2 合成器音乐音效、游戏逻辑、渲染器）都用 Emscripten
-  编译。原来依赖 Win32 / Direct3D 9 / DirectSound 的部分由 `werkkzeug3_kkrieger/wasm/`
-  （SDL2 + WebGL2 + Web Audio）替换，D3D 着色器字节码在运行时经 MojoShader 转成 GLSL ES。
-* 数据是唯一公开发布的版本：2004 Breakpoint beta，从原版 exe 中解包并转换格式。
-* 这套 werkkzeug3 源码比 beta 更新，渲染方式不同。对 beta 数据，移植版根据原版 exe
-  反汇编和 apitrace 抓帧，重写了 2004 年的渲染流程（每帧 4 盏灯、半分辨率阴影遮罩、
-  每个网格一次四灯光照、2004 年的混合模式表），与 Wine 下运行的原版逐阶段对比一致。
-
-## Play locally / 本地运行
+## Play locally
 
 Requirements: [emsdk](https://emscripten.org/docs/getting_started/downloads.html),
 Python 3, a WebGL2 browser.
@@ -59,29 +45,26 @@ python3 wasm/serve.py 8767 dist_release         # serves wasm/dist_release on 12
 The procedural content is generated at start-up; that takes a while, as it
 did in 2004.
 
-## Controls / 操作
+## Controls
 
 | key | action |
 |---|---|
-| mouse | look (click the game to capture the mouse) / 视角（点击画面锁定鼠标） |
-| W A S D | move / 移动 |
-| left mouse, right Ctrl | fire / 开火 |
-| left Shift | use (switches, doors) / 使用 |
-| 1 – 9 | weapons / 切换武器 |
-| Esc | in-game menu / 游戏内菜单 |
-| arrows, Enter | menus / 菜单选择 |
+| mouse | look (click the game to capture the mouse) |
+| W A S D | move |
+| left mouse, right Ctrl | fire |
+| left Shift | use (switches, doors) |
+| 1 – 9 | weapons |
+| Esc | in-game menu |
+| arrows, Enter | menus |
 
 On the start page you can pick the **resolution** (1024 × 768 is what the beta
 ran at) and **start in fullscreen**; the `fullscreen` button in the corner
 works at any time. `?res=WxH` in the URL sets the resolution, `?data=3383`
 plays a later development snapshot of the data instead of the beta.
-Choosing *exit .kkrieger* returns to the start page.
+Choosing *exit .kkrieger* returns to the start page. The game's log goes to the
+browser console (F12).
 
-开始页可以选择**分辨率**（原版为 1024 × 768）和**全屏启动**，右上角的 fullscreen
-按钮随时可用。URL 参数 `?res=宽x高` 指定分辨率；`?data=3383` 改为加载较晚的开发版数据。
-菜单里选 *exit .kkrieger* 会回到开始页。游戏日志只输出到浏览器控制台（F12）。
-
-## Repository layout / 目录
+## Repository layout
 
 ```
 werkkzeug3_kkrieger/          the game and tool sources (farbrausch, 2004/2005)
