@@ -1,6 +1,9 @@
 // This file is distributed under a BSD license. See LICENSE.txt for details.
 
 #include "genoverlay.hpp"
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+#endif
 #include "genmesh.hpp"
 #include "genbitmap.hpp"
 #include "genmaterial.hpp"
@@ -429,6 +432,35 @@ GenOverlayManagerClass::GenOverlayManagerClass()
   SoundEnable = 1;
 #endif
 
+#if defined(__EMSCRIPTEN__)
+  // the Breakpoint 2004 player (table at 0x83f278 in the unpacked beta) had
+  // 1024x512 / 512x256 / 256x128 / 1024x512 render targets; later versions
+  // turned sizes 0 and 2 into 16x16. The beta's glow blur and glow mask are
+  // size 2: squeezed to 16x16 they smeared a flickering haze over the whole
+  // screen and let the tinted dark-area layer through everywhere.
+  extern sInt kkBetaData;
+  static sInt sizes2004[GENOVER_RTSIZES][3] =
+  {
+    { 10,9,sTF_A8R8G8B8 },
+    {  9,8,sTF_A8R8G8B8 },
+    {  8,7,sTF_A8R8G8B8 },
+    { 10,9,sTF_A8R8G8B8 },
+  };
+  if(kkBetaData)
+    sCopyMem(sizes,sizes2004,sizeof(sizes));
+
+  // the full-size target (the last size) holds the whole 2:1 view at 1:1:
+  // at least 1024x512, larger when the page asked for a bigger screen
+  {
+    sInt bh = sMin(sSystem->ConfigX/2,sSystem->ConfigY), bw = 2*bh;
+    sInt lx = 10, ly = 9;
+    while((1<<lx) < bw && lx < 13) lx++;
+    while((1<<ly) < bh && ly < 12) ly++;
+    sizes[GENOVER_RTSIZES-1][0] = lx;
+    sizes[GENOVER_RTSIZES-1][1] = ly;
+  }
+#endif
+
   rtd = RT;
   for(i=0;i<GENOVER_RTSIZES;i++)
   {
@@ -546,6 +578,14 @@ GenOverlayRT *GenOverlayManagerClass::Alloc(KOp *owner,sInt size,sInt ocount)
 {
   sInt i;
 
+#if defined(__EMSCRIPTEN__)
+  // the output count is a later addition to the IPP operators; in
+  // kkrieger3383.kx it is missing, so it arrives as 0 and the target would be
+  // handed out again as its own source (a feedback loop WebGL rejects).
+  if(ocount < 1)
+    ocount = 1;
+#endif
+
 #ifdef _DOPE
   if(size<GENOVER_RTSIZES && ForceResolution != 3)
     size = ForceResolution;
@@ -610,21 +650,40 @@ void GenOverlayManagerClass::PrepareViewport(GenOverlayRT *rt,sViewport &vp)
     if(rt->Size == GENOVER_RTSIZES - 1) // full size rendertarget?
     {
       // yes, use 1:1 pixel mapping window
+#if defined(__EMSCRIPTEN__)
+      vp.Window.x1 = sMin(Master.Window.XSize(),rt->Bitmap->XSize);   // sized to the view (constructor)
+      vp.Window.y1 = sMin(Master.Window.YSize(),rt->Bitmap->YSize);
+#else
       vp.Window.x1 = sMin(Master.Window.XSize(),1024);
       vp.Window.y1 = sMin(Master.Window.YSize(),512);
+#endif
     }
   }
   else
     vp = Master;
 }
 
+#if defined(__EMSCRIPTEN__)
+sInt kkCycleShadows()                                     // debug (F7)
+{
+  GenOverlayManager->EnableShadows = (GenOverlayManager->EnableShadows + 1) % 3;
+  return GenOverlayManager->EnableShadows;
+}
+#endif
+
 void GenOverlayManagerClass::SetMasterViewport(sViewport &vp)
 {
   Master = vp;
 
   // recompute scale for full-size rendertargets
+#if defined(__EMSCRIPTEN__)
+  GenBitmap *full = RT[(GENOVER_RTSIZES-1)*GENOVER_RTPERSIZE].Bitmap;
+  sF32 scaleu = sMin(1.0f * vp.Window.XSize() / full->XSize,1.0f);
+  sF32 scalev = sMin(1.0f * vp.Window.YSize() / full->YSize,1.0f);
+#else
   sF32 scaleu = sMin(1.0f * vp.Window.XSize() / 1024,1.0f);
   sF32 scalev = sMin(1.0f * vp.Window.YSize() / 512,1.0f);
+#endif
 
   for(sInt i=0;i<GENOVER_RTCOUNT;i++)
   {
@@ -899,7 +958,8 @@ GenIPP * __stdcall Init_IPP_Select(sInt count,GenIPP *in,...)
 {
   GenIPP **inp;
   sInt i;
-  inp = &in;
+  sVARARGS_INIT(GenIPP *,in,count);
+  inp = sVARARGS(in);
   for(i=0;i<count;i++)
     inp[i]->Release();
   return new GenIPP;
@@ -930,8 +990,30 @@ GenIPP * __stdcall Init_IPP_JPEG(GenIPP *in,sInt size,sInt dir,sF32 strength,sIn
 
 extern sBool IntroStereo3D;
 
+#if defined(__EMSCRIPTEN__)
+// Viewport flag 0x80 (port extension, set by wasm/tools/kxconv.py for the
+// 2004 beta data): the camera comes from a Camera op inside the viewport's
+// own scene, the way the 2004 world object worked. That op only runs during
+// the scene's Exec, after the camera is needed, so each viewport remembers
+// what its scene produced and uses it the next frame.
+struct kkSceneCamEntry { KOp *Op; sMatrix Cam; };
+static kkSceneCamEntry kkSceneCams[16];
+static sInt kkSceneCamCount;
+extern sInt kkSceneCameraCount;
+
+static kkSceneCamEntry *kkFindSceneCam(KOp *op,sBool create)
+{
+  for(sInt i=0;i<kkSceneCamCount;i++)
+    if(kkSceneCams[i].Op == op) return &kkSceneCams[i];
+  if(!create || kkSceneCamCount >= 16) return 0;
+  kkSceneCams[kkSceneCamCount].Op = op;
+  return &kkSceneCams[kkSceneCamCount++];
+}
+#endif
+
 void __stdcall Exec_IPP_Viewport(KOp *parent,KEnvironment *kenv,sInt size,sInt flags,sU32 color,sF323 rot,sF323 pos,sF32 farclip,sF32 nearclip,sF32 centerx,sF32 centery,sF32 zoomx,sF32 zoomy,sU32 fogc,sF32 fogend,sF32 fogst,sF32 eyed,sF32 focal,sF32 fx0,sF32 fy0,sF32 fx1,sF32 fy1,sInt ocount)
 {
+  sF32 rot_arr[6] = { rot.x, rot.y, rot.z, pos.x, pos.y, pos.z };   // was &rot.x spanning 2 by-value params
   KOp *op;
   GenOverlayRT *rt;
   sViewport view;
@@ -973,6 +1055,13 @@ void __stdcall Exec_IPP_Viewport(KOp *parent,KEnvironment *kenv,sInt size,sInt f
       else if(flags&4)
       {
         env.CameraSpace = kenv->GameCam.CameraSpace;
+#if defined(__EMSCRIPTEN__)
+        if(flags & 0x80)
+        {
+          kkSceneCamEntry *sc = kkFindSceneCam(parent,sFALSE);
+          if(sc) env.CameraSpace = sc->Cam;
+        }
+#endif
         if((flags & 0x300)==0)
         {
           env.CenterX     = kenv->GameCam.CenterX;
@@ -985,7 +1074,7 @@ void __stdcall Exec_IPP_Viewport(KOp *parent,KEnvironment *kenv,sInt size,sInt f
       }
       else
       {
-        env.CameraSpace.InitEulerPI2(&rot.x);
+        env.CameraSpace.InitEulerPI2(rot_arr);
         env.CameraSpace.l.Init3(pos.x,pos.y,pos.z);
       }
 
@@ -1066,7 +1155,19 @@ void __stdcall Exec_IPP_Viewport(KOp *parent,KEnvironment *kenv,sInt size,sInt f
       // set viewport for culling etc.
       Engine->SetViewProject(kenv->CurrentCam);
 
+#if defined(__EMSCRIPTEN__)
+      sInt camCount = kkSceneCameraCount;
+      sMaterialEnv savedGameCam = kenv->GameCam;
+#endif
       op->Exec(kenv);
+#if defined(__EMSCRIPTEN__)
+      if((flags & 0x80) && camCount != kkSceneCameraCount)
+      {
+        kkSceneCamEntry *sc = kkFindSceneCam(parent,sTRUE);
+        if(sc) sc->Cam = kenv->GameCam.CameraSpace;
+        kenv->GameCam = savedGameCam;                 // don't leak into the next viewport
+      }
+#endif
 #ifdef _DOPE
       if(!GenOverlayManager->EnableIPP && GenOverlayManager->ForceResolution == 3)
         rt = GenOverlayManager->Alloc(parent,GENOVER_RTSIZES,ocount);
@@ -1076,6 +1177,23 @@ void __stdcall Exec_IPP_Viewport(KOp *parent,KEnvironment *kenv,sInt size,sInt f
 
       rt = GenOverlayManager->Alloc(parent,size,ocount);
       GenOverlayManager->PrepareViewport(rt,view);
+#if defined(__EMSCRIPTEN__)
+      {
+        static sU32 seen[32]; static sInt seenCount = 0;
+        sU32 id = (sU32)(sDInt)parent;
+        sBool isNew = sTRUE;
+        for(sInt si=0;si<seenCount;si++) if(seen[si] == id) isNew = sFALSE;
+        if(isNew && seenCount < 32)
+        {
+          seen[seenCount++] = id;
+          fprintf(stderr,"[kk] ippview op=%d size=%d flags=%x color=%08x pos=(%.2f %.2f %.2f) clip=%.2f..%.2f center=%.3f,%.3f zoom=%.3f,%.3f fog=%08x %.2f..%.2f eye=%.3f focal=%.3f frac=%.3f,%.3f-%.3f,%.3f ocount=%d win=%d,%d-%d,%d\n",
+                  parent->OpId,size,flags,color,pos.x,pos.y,pos.z,nearclip,farclip,centerx,centery,zoomx,zoomy,
+                  fogc,fogst,fogend,eyed,focal,fx0,fy0,fx1,fy1,ocount,
+                  view.Window.x0,view.Window.y0,view.Window.x1,view.Window.y1);
+          fflush(stderr);
+        }
+      }
+#endif
       sRect r;
       r.x0 = view.Window.x0 + view.Window.XSize() * fx0;
       r.y0 = view.Window.y0 + view.Window.YSize() * fy0;
@@ -1101,7 +1219,12 @@ void __stdcall Exec_IPP_Viewport(KOp *parent,KEnvironment *kenv,sInt size,sInt f
         
 #if !sINTRO || 1
         // HACK: default-light to make theta work properly
+#if defined(__EMSCRIPTEN__)
+        extern sInt kk04Mode;               // the 2004 beta had no such light
+        if(!Engine->GetNumLightJobs() && !kk04Mode)
+#else
         if(!Engine->GetNumLightJobs())
+#endif
         {
           // add default light
           EngLight light;
@@ -1191,6 +1314,13 @@ void __stdcall Exec_IPP_Copy(KOp *parent,KEnvironment *kenv,sInt size,sU32 color
 
 void __stdcall Exec_IPP_Blur(KOp *parent,KEnvironment *kenv,sInt size,sF32 radius,sF32 amplify,sInt type,sInt stages,sInt ocount)
 {
+#if defined(__EMSCRIPTEN__)
+  { static sU32 seen[128]; static sInt n; sU32 id=(sU32)(sDInt)parent; sBool nw=sTRUE;
+    for(sInt i=0;i<n;i++) if(seen[i]==id) nw=sFALSE;
+    if(nw && n<128) { seen[n++]=id;
+      fprintf(stderr,"[kk] ipp blur op=%d size=%d radius=%.3f amplify=%.3f type=%d stages=%d ocount=%d\n",
+              parent->OpId,size,radius,amplify,type,stages,ocount); } }
+#endif
   parent->ExecInputs(kenv);
 
 #ifdef _DOPE
@@ -1315,6 +1445,14 @@ void __stdcall Exec_IPP_Color(KOp *parent,KEnvironment *kenv,sInt size,sU32 colo
       GenOverlayManager->PrepareViewport(out,view);
       sSystem->SetViewport(view);
 
+#if defined(__EMSCRIPTEN__)
+      { static sU32 seen[128]; static sInt n;
+        sU32 id = (sU32)(sDInt)parent; sBool isNew = sTRUE;
+        for(sInt i=0;i<n;i++) if(seen[i]==id) isNew = sFALSE;
+        if(isNew && n<128) { seen[n++] = id;
+          fprintf(stderr,"[kk] ipp color op=%d size=%d op=%d color=%08x amplify=%08x ocount=%d\n",
+                  parent->OpId,size,operation,color,amplify,ocount); } }
+#endif
       GenOverlayManager->Mtrl[GENOVER_COLOR0+operation]->SetTex(0,in->Bitmap->Texture);
       GenOverlayManager->Mtrl[GENOVER_COLOR0+operation]->Color[0] = color;
       GenOverlayManager->Mtrl[GENOVER_COLOR0+operation]->Color[2] = amplify;
@@ -1330,6 +1468,13 @@ void __stdcall Exec_IPP_Color(KOp *parent,KEnvironment *kenv,sInt size,sU32 colo
 
 void __stdcall Exec_IPP_Merge(KOp *parent,KEnvironment *kenv,sInt size,sInt operation,sInt alpha,sU32 amplify,sInt ocount)
 {
+#if defined(__EMSCRIPTEN__)
+  { static sU32 seen[128]; static sInt n; sU32 id=(sU32)(sDInt)parent; sBool nw=sTRUE;
+    for(sInt i=0;i<n;i++) if(seen[i]==id) nw=sFALSE;
+    if(nw && n<128) { seen[n++]=id;
+      fprintf(stderr,"[kk] ipp merge op=%d size=%d op=%d alpha=%d amplify=%08x ocount=%d\n",
+              parent->OpId,size,operation,alpha,amplify,ocount); } }
+#endif
   GenOverlayRT *in[2],*out;
   sViewport view;
   sInt i;
@@ -1346,6 +1491,7 @@ void __stdcall Exec_IPP_Merge(KOp *parent,KEnvironment *kenv,sInt size,sInt oper
     return;
   }
 #endif
+
 
   if(!out)
   {
@@ -1520,6 +1666,12 @@ void __stdcall Exec_IPP_Layer2D(KOp *parent,KEnvironment *kenv,sInt size,sFRect 
 
 void __stdcall Exec_IPP_Select(KOp *op,KEnvironment *kenv,sInt count)
 {
+#if defined(__EMSCRIPTEN__)
+  // Select's convention has no OPC_OUTPUTCOUNT, so count was never pushed
+  // (x86 read whatever sat on the stack; here it is 0, which dropped the
+  // output's reference one reader early). It means the number of readers.
+  count = op->GetOutputCount();
+#endif
   GenOverlayRT *prev=0, *current=0;
 
   /*for(sInt i=0;i<op->GetInputCount();i++)

@@ -546,7 +546,14 @@ sBool sMaterial11::Compile()
   {
     flags = Combiner[i];
     codegenData[i+30] = pssrc13[i];
+#if defined(__EMSCRIPTEN__)
+    // honour sMCA_INVERTA on combiner alpha sources too (only the IPP "alpha"
+    // merge sets it; without the complement it showed the text layer where
+    // it is transparent and hid it where it is opaque)
+    codegenData[i+43] = psalpha13[flags & 0x00f] | ((flags & sMCA_INVERTA) ? XS_COMP : 0);
+#else
     codegenData[i+43] = psalpha13[flags & 0x00f];
+#endif
   }
 
   // compile vertex shader

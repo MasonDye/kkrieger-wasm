@@ -1,6 +1,19 @@
 // This file is distributed under a BSD license. See LICENSE.txt for details.
 
 #include "kdoc.hpp"
+#if defined(__EMSCRIPTEN__)
+#include "wasm/kop_thunks.hpp"
+#include <stdio.h>
+#define KKLOG(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); } while(0)
+extern "C" int emmalloc_validate_memory_regions(void);   // -sMALLOC=emmalloc
+sInt kkBitmapLog = 0;                                    // debug: log every bitmap/mesh op result (slow)
+static sInt kkClassIds[256];                            // debug: file class index -> operator id
+sInt kkExecTrace = 0;                                    // debug: log one frame of op execution
+sInt kkOldDataLayout = 0;
+sInt kkBetaData = 0;                                     // converted Breakpoint 2004 data (wasm/tools/kxconv.py)                                // data/kkrieger3383.kx uses pre-release layouts
+#else
+#define KKLOG(...)
+#endif
 
 #include "genbitmap.hpp"
 #include "genmaterial.hpp"
@@ -193,6 +206,21 @@ sInt KOp::Calc(KEnvironment *env,sInt flags)
 #endif
 
     CalcError = (Cache==0);
+#if defined(__EMSCRIPTEN__)
+    if(CalcError)
+    {
+      static sInt failed;
+      if(failed++ < 64)
+      {
+        sChar buf[160]; sInt n = 0;
+        for(sInt j=0;j<GetInputCount() && j<6;j++)
+          n += sprintf(buf+n,"%d:%s ",GetInput(j) ? GetInput(j)->OpId : -1,
+                       GetInput(j) && GetInput(j)->Cache ? "ok" : "null");
+        buf[n] = 0;
+        KKLOG("[kk] op FAILED op=%d cmd=%02x conv=%08x inputs=%s\n",OpId,kkClassIds[Command&255],Convention,buf);
+      }
+    }
+#endif
     CacheCount = OutputCount;
     Changed = 0;
   }
@@ -302,6 +330,14 @@ static sInt CallCode(sInt code,sInt *para,sInt count)
 KObject *KOp::Call(KEnvironment *kenv)
 {
   sU32 data[KK_MAXINPUT+128];
+#if defined(__EMSCRIPTEN__)
+  // kkrieger3383.kx was exported by an older werkkzeug: some operators have
+  // fewer parameters than the handlers here expect (the Viewport op gained
+  // stereo-3d and sub-rectangle parameters later). The file's convention
+  // decides how many are pushed, so zero the buffer and let the extra ones
+  // read as 0 instead of stack garbage.
+  sSetMem(data,0,sizeof(data));
+#endif
   sInt p,pNoPara;
   sInt i,max;
   KObject *o;
@@ -347,6 +383,14 @@ KObject *KOp::Call(KEnvironment *kenv)
       data[p++] = 0;
     }
   }
+
+#if defined(__EMSCRIPTEN__)
+  // the old export's IPP Viewport has no spline input yet: without a
+  // placeholder the size parameter lands in the spline slot and the init
+  // handler calls Release() on address 4
+  if(kkOldDataLayout && kkClassIds[Command&255]==0xf0 && OPC_GETINPUT(Convention)==1)
+    data[p++] = 0;
+#endif
 
 // links
 
@@ -431,14 +475,72 @@ KObject *KOp::Call(KEnvironment *kenv)
     if(Convention&OPC_ALTINIT)
       p = pNoPara;
 
+#if defined(__EMSCRIPTEN__)
+    result = InitHandler((sInt *)data,p);
+    if(kkBitmapLog && result && result->ClassId==KC_MESH)
+    {
+      // debug: size of every generated mesh, to find ops that lose geometry
+      GenMesh *m = (GenMesh *)result;
+      sInt live = 0, sel = 0;
+      for(sInt j=0;j<m->Face.Count;j++) if(m->Face[j].Material) { live++; if(m->Face[j].Select) sel++; }
+      sF32 bb[6] = { 1e9f,1e9f,1e9f,-1e9f,-1e9f,-1e9f };
+      sInt vs = m->VertSize();
+      for(sInt j=0;j<m->VertCount;j++)
+      {
+        const sVector &v = m->VertBuf[j*vs+sGMI_POS];
+        bb[0]=sMin(bb[0],v.x); bb[1]=sMin(bb[1],v.y); bb[2]=sMin(bb[2],v.z);
+        bb[3]=sMax(bb[3],v.x); bb[4]=sMax(bb[4],v.y); bb[5]=sMax(bb[5],v.z);
+      }
+      sChar buf[160]; sInt n = 0;
+      for(sInt j=0;j<GetInputCount() && j<6;j++)
+        n += sprintf(buf+n,"%d,",GetInput(j) ? GetInput(j)->OpId : -1);
+      buf[n] = 0;
+      KKLOG("[kk] mesh op=%d cmd=%02x in=%s at=%p faces=%d/%d sel=%d verts=%d mtrl=%d bb=%.2f,%.2f,%.2f..%.2f,%.2f,%.2f p=%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+            OpId,kkClassIds[Command&255],buf,m,live,m->Face.Count,sel,m->VertCount,m->Mtrl.Count,bb[0],bb[1],bb[2],bb[3],bb[4],bb[5],
+            data[0],data[1],data[2],data[3],data[4],data[5],data[6],data[7],data[8],data[9],data[10],data[11],data[12]);
+    }
+    if(result && result->ClassId==KC_BITMAP)
+    {
+      extern void kkDumpBitmap(sInt opid,const sU16 *px,sInt w,sInt h);
+      kkDumpBitmap(OpId,(const sU16 *)((GenBitmap *)result)->Data,((GenBitmap *)result)->XSize,((GenBitmap *)result)->YSize);
+    }
+    if(kkBitmapLog && result && result->ClassId==KC_BITMAP)
+    {
+      // debug: average colour of every generated bitmap, to find the op
+      // that makes the textures too dark
+      GenBitmap *bm = (GenBitmap *)result;
+      sF64 sum[4] = {0,0,0,0};
+      const sU16 *px = (const sU16 *)bm->Data;
+      for(sInt j=0;j<bm->Size;j++) for(sInt k=0;k<4;k++) sum[k] += px[j*4+k];
+      sChar buf[160]; sInt n = 0;
+      for(sInt j=0;j<GetInputCount() && j<4;j++)
+        n += sprintf(buf+n,"%d,",GetInput(j) ? GetInput(j)->OpId : -1);
+      buf[n] = 0;
+      KKLOG("[kk] bm op=%d cmd=%02x in=%s at=%p %dx%d avg=%d,%d,%d,%d p=%08x %08x %08x %08x %08x %08x %08x %08x\n",OpId,kkClassIds[Command&255],buf,bm,
+            bm->XSize,bm->YSize,(sInt)(sum[2]/bm->Size)>>7,(sInt)(sum[1]/bm->Size)>>7,(sInt)(sum[0]/bm->Size)>>7,(sInt)(sum[3]/bm->Size)>>7,
+            data[0],data[1],data[2],data[3],data[4],data[5],data[6],data[7]);
+    }
+#else
     result = (KObject *)CallCode((sInt)InitHandler,(sInt *)data,p);
+#endif
   }
 #else
   {
     if(Convention&OPC_ALTINIT)
       p = pNoPara;
 
+#if defined(__EMSCRIPTEN__)
+#if KK_VERBOSE
+    KKLOG("[kk] calc cmd=%d opid=%d conv=%08x inputs=%d\n",Command,OpId,Convention,GetInputCount());
+#endif
+    result = InitHandler((sInt *)data,p);
+#if KK_VERBOSE && !defined(KK_HEADLESS)              // the ASan build has no emmalloc
+    if(emmalloc_validate_memory_regions() != 0)     // 0 == heap is consistent
+      KKLOG("[kk] HEAP CORRUPTION detected right after cmd=%d opid=%d\n",Command,OpId);
+#endif
+#else
     result = (KObject *)CallCode((sInt)InitHandler,(sInt *)data,p);
+#endif
   }
 #endif
 
@@ -512,6 +614,14 @@ void KOp::ExecWithNewMem(KEnvironment *kenv,KInstanceMem **link)
 void KOp::Exec(KEnvironment *kenv)
 {
   sU32 data[KK_MAXINPUT+128];
+#if defined(__EMSCRIPTEN__)
+  // kkrieger3383.kx was exported by an older werkkzeug: some operators have
+  // fewer parameters than the handlers here expect (the Viewport op gained
+  // stereo-3d and sub-rectangle parameters later). The file's convention
+  // decides how many are pushed, so zero the buffer and let the extra ones
+  // read as 0 instead of stack garbage.
+  sSetMem(data,0,sizeof(data));
+#endif
   sInt p;
   sInt i,max;
   sInt pops;
@@ -546,13 +656,23 @@ void KOp::Exec(KEnvironment *kenv)
 
 // do animation
 
+#if defined(__EMSCRIPTEN__)
+  if(kkExecTrace)
+    KKLOG("[kk] exec op=%d cmd=%d cls=%d events=%p\n",OpId,Command,Cache?Cache->ClassId:-1,FirstEvent);
+#endif
+
   pops = kenv->ExecuteAnim(this,AnimCode);
 
 // the simple case...
 
   if(Convention&OPC_ALTEXEC)
   {
+#if defined(__EMSCRIPTEN__)
+    { sInt altpara[2]; altpara[0] = (sInt)(sDInt)this; altpara[1] = (sInt)(sDInt)kenv;
+      ExecHandler(altpara,2); }
+#else
     ((void (__stdcall *)(KOp *,KEnvironment *))ExecHandler)(this,kenv);
+#endif
   }
   else
   {
@@ -577,7 +697,11 @@ void KOp::Exec(KEnvironment *kenv)
     if(Convention&OPC_OUTPUTCOUNT)        // outputcount
       data[p++] = OutputCount;
 
+#if defined(__EMSCRIPTEN__)
+    ExecHandler((sInt *)data,p);                 // call
+#else
     CallCode((sInt)ExecHandler,(sInt *)data,p);   // call
+#endif
   }
 
 // end animation
@@ -1564,6 +1688,14 @@ static sBool DistributeAnimR(KOp *start)
 {
   sInt i;
 
+#if defined(__EMSCRIPTEN__) && KK_VERBOSE
+  static sInt depth = 0, calls = 0;
+  depth++; calls++;
+  if(calls <= 12 || depth > 150 || (calls & 4095) == 0)
+    KKLOG("[kk] DistributeAnimR call=%d depth=%d op=%p inputs=%d anim=%p\n",calls,depth,start,start->GetInputCount(),start->GetAnimCode());
+  struct DepthGuard { sInt &d; ~DepthGuard() { d--; } } guard = { depth };
+#endif
+
   sBool flag = start->GetAnimCode()[0] != KA_END;
 
   for(i=0;i<start->GetInputCount();i++)
@@ -1576,8 +1708,19 @@ static sBool DistributeAnimR(KOp *start)
 
 #if sPLAYER
 
+#if defined(__EMSCRIPTEN__)
+static KDoc *kkDoc;                                       // debug: the loaded document
+KObject *kkOpCache(sInt index)                            // debug: cached object of the index-th operator
+{
+  return (kkDoc && index >= 0 && index < kkDoc->Ops.Count) ? kkDoc->Ops[index].Cache : 0;
+}
+#endif
+
 void KDoc::Init(const sU8 *&dataPtr)
 {
+#if defined(__EMSCRIPTEN__)
+  kkDoc = this;
+#endif
   const sU8 *data;
   sChar *pack;
   sInt i,j,k,in,nOps,nSplines,typeByte,delta,nClasses,max;
@@ -1591,8 +1734,23 @@ void KDoc::Init(const sU8 *&dataPtr)
   sInt flags;
 
   data = dataPtr;
+  sInt oldLayout = 0;
+  KKLOG("[kk] KDoc::Init enter data=%p first=%08x\n",data,*(sU32 *)data);
 
   flags = *(sU32 *)data; data+=4;
+#if defined(__EMSCRIPTEN__)
+  // Older exports (data/kkrieger3383.kx) start directly with SongSize: no
+  // flags word, no sample block. Legitimate flags only use bits 0..2, a song
+  // size is far larger, so the two layouts are easy to tell apart.
+  if(flags & ~7u)
+  {
+    KKLOG("[kk] KDoc::Init: old export layout (no flags word), first dword %d\n",flags);
+    data -= 4;
+    flags = 2;                  // song block is always followed by the sample block
+    oldLayout = 1;
+    kkOldDataLayout = 1;
+  }
+#endif
   BuzzTiming = (flags&4);
   if(flags&1) data+=32;
   SongSize = *(sU32 *)data; data+=4;
@@ -1612,6 +1770,13 @@ void KDoc::Init(const sU8 *&dataPtr)
   Ops.Init(nOps); Ops.Count = nOps;
   Splines.Init(nSplines); Splines.Count = nSplines;
 
+#if defined(__EMSCRIPTEN__)
+#define KKDIAG(phase) KKLOG("[kk] KDoc::Init %-12s offset=%d\n",phase,(int)(data-dataPtr))
+  KKLOG("[kk] KDoc::Init flags=%d nOps=%d nSplines=%d SongSize=%d SampleSize=%d BPM=%d\n",flags,nOps,nSplines,SongSize,SampleSize,SongBPM);
+#else
+#define KKDIAG(phase)
+#endif
+
   cls = KClasses;
   nClasses = 0;
 
@@ -1619,7 +1784,10 @@ void KDoc::Init(const sU8 *&dataPtr)
   {
     data += 4;
     cls->Convention = conv;
-    i = *((sU16 *)data); data+=2;
+#if defined(__EMSCRIPTEN__)
+    if(oldLayout) { i = *data++; } else   // class ids were one byte before the 0x100+ minmesh ops
+#endif
+    { i = *((sU16 *)data); data+=2; }
     cls->Packing = (sChar *) data;
     while(*data++);
 
@@ -1638,11 +1806,22 @@ void KDoc::Init(const sU8 *&dataPtr)
  
     cls->InitHandler = handler->InitHandler;
     cls->ExecHandler = handler->ExecHandler;
+#if defined(__EMSCRIPTEN__)
+    kkClassIds[nClasses&255] = i;
+    if(kkBitmapLog) KKLOG("[kk] fileclass id=%02x conv=%08x pack=%s\n",i,conv,cls->Packing);
+#endif
+#if defined(__EMSCRIPTEN__) && KK_VERBOSE
+    KKLOG("[kk] class cmd=%d id=%02x conv=%08x\n",nClasses,i,conv);
+#endif
     cls++;
     nClasses++;
   }
 
   data += 4;
+  KKDIAG("classes");
+#if defined(__EMSCRIPTEN__)
+  KKLOG("[kk] KDoc::Init nClasses=%d\n",nClasses);
+#endif
 
   // read op types+connections, build the tree
   for(i=0;i<nOps;i++)
@@ -1688,6 +1867,8 @@ void KDoc::Init(const sU8 *&dataPtr)
         dest->AddOutput(op);
     }
   }
+
+  KKDIAG("tree+links");
 
   // read ops sorted by type
   for(i=0;i<nClasses;i++)
@@ -1742,6 +1923,8 @@ void KDoc::Init(const sU8 *&dataPtr)
     }
   }
 
+  KKDIAG("params");
+
   // read anim codes
   for(i=0;i<nOps;i++)
   {
@@ -1749,6 +1932,7 @@ void KDoc::Init(const sU8 *&dataPtr)
     Ops[i].SetAnimCode((sU8*)data,j);
     data += j;
   }
+  KKDIAG("animcodes");
 
   // read events
   Events.Init();
@@ -1789,6 +1973,10 @@ void KDoc::Init(const sU8 *&dataPtr)
     event->EndInterval = sReadF16(data);
   }
 
+#if defined(__EMSCRIPTEN__)
+  KKLOG("[kk] events=%d\n",Events.Count);
+#endif
+
   // read splines
   for(i=0;i<nSplines;i++)
   {
@@ -1824,8 +2012,18 @@ void KDoc::Init(const sU8 *&dataPtr)
   }
 
   // distribute anim flag
+#if defined(__EMSCRIPTEN__)
+  KKDIAG("pre-distrib");
+  KKLOG("[kk] KDoc::Init root op inputs=%d animcode0=%d\n",Ops[Ops.Count-1].GetInputCount(),Ops[Ops.Count-1].GetAnimCode()[0]);
+#endif
   DistributeAnimR(&Ops[Ops.Count-1]);
 
+#if defined(__EMSCRIPTEN__)
+  // the converted 2004 data has one root for intro, menu and game; later
+  // exports have one per mode. Some operators behaved differently in 2004.
+  kkBetaData = (rootindex[0]==rootindex[1] && rootindex[1]==rootindex[2]);
+  if(kkBetaData) KKLOG("[kk] KDoc::Init: 2004 beta data\n");
+#endif
   for(i=0;i<MAX_OP_ROOT;i++)
   {
     if(rootindex[i]<nOps)
@@ -1910,6 +2108,23 @@ void KDoc::Precalc(KEnvironment *kenv)
   PrecalcMax = CountOps(RootOps[CurrentRoot]);
   RootOps[CurrentRoot]->Calc(kenv,KCF_ROOT|KCF_NEED|KCF_PRECALC);
 
+#if defined(__EMSCRIPTEN__)
+  {
+    // which operators ended up without a result? those are silently skipped
+    // everywhere downstream (a missing IPP op drops the whole post chain)
+    sInt total = 0, empty = 0, byCmd[256];
+    for(sInt i=0;i<256;i++) byCmd[i] = 0;
+    for(sInt i=0;i<Ops.Count;i++)
+    {
+      total++;
+      if(!Ops[i].Cache && !Ops[i].CacheFreed) { empty++; byCmd[Ops[i].Command & 255]++; }
+    }
+    KKLOG("[kk] precalc root %d: %d used ops, %d without a result\n",CurrentRoot,total,empty);
+    for(sInt i=0;i<256;i++)
+      if(byCmd[i]) KKLOG("[kk]   cmd %d: %d ops with no result\n",i,byCmd[i]);
+  }
+#endif
+
 #if sOP_PERFORMANCE
   sInt perft = 0;
 
@@ -1935,6 +2150,17 @@ void KDoc::AddEvents(KEnvironment *kenv)
 
   for(i=0;i<Events.Count;i++)
     kenv->AddStaticEvent(&Events[i]);
+
+#if defined(__EMSCRIPTEN__)
+  {
+    if(kkExecTrace)
+      for(i=0;i<Events.Count;i++)
+        KKLOG("[kk] addev %d beat=%.2f range=%.2f..%.2f linked=%d first=%d\n",i,
+              kenv->BeatTime/65536.0f,Events[i].Start/65536.0f,Events[i].End/65536.0f,
+              Events[i].NextOp || Events[i].Op->FirstEvent == &Events[i],
+              Events[i].Op->FirstEvent == &Events[i]);
+  }
+#endif
 }
 
 static sInt CountOpsR(KOp *op)
@@ -2488,6 +2714,11 @@ void __stdcall Exec_Misc_Event(KOp *op,KEnvironment *kenv,sF32 duration)
   
   sVERIFY(op->GetInput(0));
   event = op->FirstEvent;
+#if defined(__EMSCRIPTEN__)
+  if(kkExecTrace)
+    KKLOG("[kk] eventop op=%d first=%p in0=%d\n",op->OpId,op->FirstEvent,
+          op->GetInput(0) ? op->GetInput(0)->OpId : -1);
+#endif
   while(event)
   {
     if(event->Start == event->End)
@@ -2519,7 +2750,11 @@ void __stdcall Exec_Misc_Trigger(KOp *op,KEnvironment *kenv,
 
   eop = op->GetLink(0);
 
+#if defined(__EMSCRIPTEN__)
+  if(eop && eop->ExecHandler == kopw_Exec_Misc_Event)
+#else
   if(eop && eop->ExecHandler == Exec_Misc_Event)
+#endif
   {
     mem = kenv->GetInst<TriggerMem>(op);
     if(mem->Reset)
@@ -2687,6 +2922,14 @@ void __stdcall Exec_Misc_If(KOp *op,KEnvironment *kenv,sInt sw,sInt val)
 {
   KOp *child;
 
+#if defined(__EMSCRIPTEN__)
+  { static sU32 seen[64]; static sInt n; sU32 id=(sU32)(sDInt)op; sBool nw=sTRUE;
+    for(sInt k=0;k<n;k++) if(seen[k]==id) nw=sFALSE;
+    if(nw && n<64) { seen[n++]=id;
+      KKLOG("[kk] if op=%d switch[%d]=%d == %d ? %s (inputs=%d)\n",op->OpId,sw,
+            kenv->Game->Switches[sw],val,
+            kenv->Game->Switches[sw]==val ? "yes" : "no",op->GetInputCount()); } }
+#endif
   sVERIFY(op->GetInputCount()>=1);
   if(kenv->Game->Switches[sw]==val)
   {
@@ -2854,6 +3097,28 @@ void __stdcall Exec_Misc_PlaySample(KOp *op,KEnvironment *kenv,sInt sw,sInt val,
 #if !sPLAYER
     if(GenOverlayManager->SoundEnable)
 #endif
+#if defined(__EMSCRIPTEN__)
+    if(kkBetaData)
+    {
+      // 2004 (exec_0c in the unpacked beta, around 0x819540): no 3d sound;
+      // the source is placed once, at trigger time, in camera space: pan
+      // x/|z+0.2|, volume scaled by min(1,halfrange/2/distance)
+      sF32 vol = sFPow(10.0f,-volume/20.0f), pan = 0;
+      if(halfrange)
+      {
+        sMatrix cam = kenv->CurrentCam.CameraSpace;
+        sVector v;
+        cam.TransR();
+        v.Rotate34(cam,kenv->ExecStack.Top().l);
+        pan = v.x/sFAbs(v.z+0.2f);
+        vol *= sMin(1.0f,halfrange*0.5f/sMax(v.Abs3(),1e-3f));
+      }
+      sSystem->SamplePlay(sample,vol,pan);
+      if(retrigger>0)
+        mem->Retrigger = sFtol(retrigger*1000);
+    }
+    else
+#endif
     {
       buf = sSystem->SamplePlay(sample,sFPow(10.0f,-volume/20.0f),0);
       if(retrigger>0)
@@ -2919,6 +3184,17 @@ void __stdcall Exec_Misc_Demo(KOp *op,KEnvironment *kenv)
 {
   sInt i;
   KOp *in;
+
+#if defined(__EMSCRIPTEN__)
+  { static sU32 seen[8]; static sInt n; sU32 id=(sU32)(sDInt)op; sBool nw=sTRUE;
+    for(sInt k=0;k<n;k++) if(seen[k]==id) nw=sFALSE;
+    if(nw && n<8) { seen[n++]=id;
+      KKLOG("[kk] demo op=%d inputs=%d\n",op->OpId,op->GetInputCount());
+      for(sInt k=0;k<op->GetInputCount();k++)
+      { KOp *x = op->GetInput(k);
+        KKLOG("[kk]   input %d: op=%d cmd=%d cls=%d cache=%p\n",k,x?x->OpId:-1,x?x->Command:-1,
+              (x&&x->Cache)?x->Cache->ClassId:-1,x?(void *)x->Cache:0); } } }
+#endif
 
   for(i=0;i<op->GetInputCount();i++)
   {

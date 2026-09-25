@@ -11,6 +11,23 @@
 #include "_start.hpp"
 #include "rtmanager.hpp"
 
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+#define KKLOG(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); } while(0)
+extern sInt kkExecTrace;                                  // kdoc.cpp: one-frame op trace
+sInt kkPaintAllSectors = 0;                               // debug (F11): skip portal visibility
+sInt kkUsageFilter = 0;                                   // debug (F6): 1 = base only, 2 = lighting only
+extern "C" int kkJsInt(const char *name);                 // _start_wasm.cpp: window[name] as a number, -1 if unset
+extern KObject *kkOpCache(sInt index);                    // kdoc.cpp: cached object of an operator
+extern "C" int kkJsFlag(const char *name);                // _start_wasm.cpp: window[name] truthy
+extern "C" int kkTakeFlag(const char *name);              // _start_wasm.cpp: same, and clears it
+void kk04Capture(const char *what);                       // _start_wasm.cpp: save the viewport (debug)
+extern sInt kkBetaData;                                   // kdoc.cpp: Breakpoint 2004 data loaded
+sInt kk04Mode = 0;                                        // light like the 2004 beta (window.__kkNo2004 turns it off)
+#include "wasm/render2004.hpp"
+#include "materials/material11.hpp"
+#endif
+
 #include "_gui.hpp"
 
 #if sPROFILE
@@ -337,6 +354,10 @@ void EngMesh::Copy(KObject *o)
 // Converts a GenMesh to a list of jobs and a vertex buffer.
 void EngMesh::FromGenMesh(GenMesh *mesh)
 {
+#if defined(__EMSCRIPTEN__)
+  extern sInt kkBitmapLog;
+  if(kkBitmapLog) fprintf(stderr,"[kk] engmesh %p from genmesh %p faces=%d mtrl=%d\n",this,mesh,mesh->Face.Count,mesh->Mtrl.Count);
+#endif
   mesh->NeedAllNormals();
   CalcPartBoundingBoxes(mesh);
   FillVertexBuffer(mesh);
@@ -2538,6 +2559,12 @@ Engine_::Engine_()
 #endif
 
   UsageMask = ~0U;
+#if defined(__EMSCRIPTEN__)
+  Lights04Count = 0;
+  Build04 = sFALSE;
+  Shadow04Jobs = 0;
+  Shadow04Count = 0;
+#endif
 
   sMaterialEnv env;
   env.Init();
@@ -2612,6 +2639,10 @@ void Engine_::StartFrame()
 
   WeaponLightSet = sFALSE;
   CurrentSectorPaint = sTRUE;
+#if defined(__EMSCRIPTEN__)
+  Lights04Count = 0;
+  kk04Mode = kkBetaData && !kkJsFlag("__kkNo2004");
+#endif
   Mem.Flush();
   BigMem.Flush();
 }
@@ -2657,6 +2688,24 @@ void Engine_::AddPaintJob(KOp *op,const sMatrix &matrix,KEnvironment *kenv,sInt 
 
 void Engine_::AddLightJob(const EngLight &light)
 {
+#if defined(__EMSCRIPTEN__)
+  extern sInt kkDumpJobs;
+  if(kkDumpJobs)
+  {
+    sInt outPlane = -1;
+    for(sInt i=0;i<Frustum.NPlanes;i++)
+      if(Frustum.Planes[i].Distance(light.Position) < -light.Range) { outPlane = i; break; }
+    sF32 dd = light.Position.Distance(Env.CameraSpace.l);
+    fprintf(stderr,"[kk] addlight pos=%.2f,%.2f,%.2f col=%08x amp=%.3f range=%.2f flags=%x dist=%.2f imp=%.2f frustum-out=%d\n",
+            light.Position.x,light.Position.y,light.Position.z,light.Color,light.Amplify,light.Range,light.Flags,dd,
+            light.Range/sMax(dd,0.1f),outPlane);
+  }
+#endif
+#if defined(__EMSCRIPTEN__)
+  // the 2004 renderer picks its four lights from all of them (no culling)
+  if(kk04Mode && Lights04Count < 64)
+    Lights04[Lights04Count++] = light;
+#endif
   // Start with a quick sphere-frustum rejection test
   for(sInt i=0;i<Frustum.NPlanes;i++)
   {
@@ -2699,6 +2748,9 @@ void Engine_::AddLightJob(const EngLight &light)
 
 void Engine_::AddAmbientLight(sU32 color)
 {
+#if defined(__EMSCRIPTEN__)
+  { static sInt n; if(n++ < 4) fprintf(stderr,"[kk] ambient light %08x\n",color); }
+#endif
   sInt newR = sRange<sInt>(((AmbientLight >> 16) & 0xff) + ((color >> 16) & 0xff),255,0);
   sInt newG = sRange<sInt>(((AmbientLight >>  8) & 0xff) + ((color >>  8) & 0xff),255,0);
   sInt newB = sRange<sInt>(((AmbientLight >>  0) & 0xff) + ((color >>  0) & 0xff),255,0);
@@ -2753,7 +2805,7 @@ void Engine_::ProcessPortals(KEnvironment *kenv,KKriegerCell *observerCell)
   unitBox.Init(-1,-1,1,1);
 
   // process sector visibility
-  if(!observerCell) // just paint everything
+  if(!observerCell || kkPaintAllSectors) // just paint everything
   {
     for(GenScene *job=SectorJobs;job;job=job->Next)
     {
@@ -2821,7 +2873,13 @@ void Engine_::Paint(KEnvironment *kenv,sBool specular)
 #endif
 
   sU32 oldUsageMask = UsageMask;
-  
+
+#if defined(__EMSCRIPTEN__)
+  // debug (F6): 1 = base only, 2 = lighting only
+  if(kkUsageFilter == 1) UsageMask &= ~((1 << ENGU_LIGHT) | (1 << ENGU_AMBIENT) | (1 << ENGU_POSTLIGHT) | (1 << ENGU_POSTLIGHT2));
+  if(kkUsageFilter == 2) UsageMask &= ~(1 << ENGU_BASE);
+#endif
+
   // remove unwanted passes via usage mask
   if(GenOverlayManager->EnableShadows >= 2)
     UsageMask &= ~(1 << ENGU_LIGHT);
@@ -2829,8 +2887,30 @@ void Engine_::Paint(KEnvironment *kenv,sBool specular)
   if(GenOverlayManager->EnableShadows >= 1)
     UsageMask &= ~(1 << ENGU_SHADOW);
 
+#if defined(__EMSCRIPTEN__)
+  if(kk04Mode)
+  {
+    Paint2004(kenv,specular);
+    UsageMask = oldUsageMask;
+    return;
+  }
+#endif
+
   // FIRE! (damn, this routine is getting shorter and shorter)
   BuildPaintJobs();
+#if defined(__EMSCRIPTEN__)
+  {
+    if(kkExecTrace)
+    {
+      sInt meshes = 0, effects = 0;
+      for(MeshJob *j = MeshJobs; j; j = j->Next) meshes++;
+      for(EffectJob *j = EffectJobs; j; j = j->Next) effects++;
+      KKLOG("[kk] engine: meshes=%d effects=%d jobs=%d lights=%d beat=%.2f cam=(%f %f %f)\n",
+            meshes,effects,PaintJobs.Count,LightJobCount,kenv->BeatTime/65536.0f,
+            View.l.x,View.l.y,View.l.z);
+    }
+  }
+#endif
   SortPaintJobs();
   ApplyViewProject();
   RenderPaintJobs(kenv);
@@ -2845,6 +2925,18 @@ void Engine_::PaintSimple(KEnvironment *kenv)
   UsageMask = 1 << ENGU_OTHER;
 
   BuildPaintJobs();
+#if defined(__EMSCRIPTEN__)
+  {
+    if(kkExecTrace)
+    {
+      sInt meshes = 0, effects = 0;
+      for(MeshJob *j = MeshJobs; j; j = j->Next) meshes++;
+      for(EffectJob *j = EffectJobs; j; j = j->Next) effects++;
+      KKLOG("[kk] engineS: meshes=%d effects=%d jobs=%d beat=%.2f\n",
+            meshes,effects,PaintJobs.Count,kenv->BeatTime/65536.0f);
+    }
+  }
+#endif
   SortPaintJobs();
   ApplyViewProject();
   RenderPaintJobs(kenv);
@@ -3046,6 +3138,12 @@ void Engine_::InsertLightJob(const EngLight &light,sF32 importance,sF32 fade)
     for(sInt j=sMin(LightJobCount,MAXLIGHT-1);j>i;j--)
       LightJobs[j] = LightJobs[j-1];
 
+#if defined(__EMSCRIPTEN__)
+    { static sInt n; if(n++ < 10)
+        fprintf(stderr,"[kk] light %d: colour=%08x amplify=%.3f fade=%.3f range=%.2f flags=%x pos=(%.1f %.1f %.1f) importance=%.2f\n",
+                i,light.Color,light.Amplify,fade,light.Range,light.Flags,
+                light.Position.x,light.Position.y,light.Position.z,importance); }
+#endif
     // actually store light
     LightJobs[i] = light;
     LightJobs[i].Amplify *= fade;
@@ -3059,6 +3157,9 @@ void Engine_::InsertLightJob(const EngLight &light,sF32 importance,sF32 fade)
       Env.NearClip,&Env.ZoomX,rect);
 
     // done
+#if defined(__EMSCRIPTEN__)
+    if(LightJobCount < MAXLIGHT)      // the last one just fell off the end; LightJobs has MAXLIGHT entries
+#endif
     LightJobCount++;
   }
 }
@@ -3167,9 +3268,49 @@ void Engine_::PortalVisR(GenScene *start,sInt thresh,const sFRect &box)
 
 /****************************************************************************/
 
+#if defined(__EMSCRIPTEN__)
+struct Engine_::Shadow04Job
+{
+  Shadow04Job *Next;
+  sInt JobId;
+  EngMesh *Mesh;
+  sInt MatrixId;
+  GenMaterialPass *Pass;
+  void *BoneData;
+  sAABox Box;                                   // world space
+};
+
+// ENGU_* -> the usage order of the 2004 engine: z-fill+ambient, shadow,
+// light, texture, everything else
+static sInt Usage04(sInt usage)
+{
+  static const sU8 map[ENGU_MAX] = { 0,0,0,1,2,3,4,4 };
+  return map[usage & (ENGU_MAX - 1)];
+}
+#endif
+
 void Engine_::BuildPaintJobs()
 {
   sZONE(BuildJobs);
+#if defined(__EMSCRIPTEN__)
+  extern sInt kkDumpJobs;
+  struct DumpOnce { ~DumpOnce() { extern sInt kkDumpJobs; kkDumpJobs = 0; } } dumpOnce;
+  if(kkDumpJobs)
+  {
+    sInt n = 0;
+    for(MeshJob *job=MeshJobs;job;job=job->Next) n++;
+    fprintf(stderr,"[kk] ---- paint jobs: %d mesh jobs, %d lights\n",n,LightJobCount);
+    for(sInt i=0;i<LightJobCount;i++)
+    {
+      const EngLight &l = LightJobs[i];
+      fprintf(stderr,"[kk] light %d pos=%.2f,%.2f,%.2f col=%08x amp=%.3f range=%.2f flags=%x imp=%.2f\n",i,
+              l.Position.x,l.Position.y,l.Position.z,l.Color,l.Amplify,l.Range,l.Flags,l.Importance);
+    }
+    fprintf(stderr,"[kk] weapon light set=%d pos=%.2f,%.2f,%.2f col=%08x amp=%.3f range=%.2f cam=%.2f,%.2f,%.2f\n",WeaponLightSet,
+            WeaponLight.Position.x,WeaponLight.Position.y,WeaponLight.Position.z,WeaponLight.Color,WeaponLight.Amplify,WeaponLight.Range,
+            Env.CameraSpace.l.x,Env.CameraSpace.l.y,Env.CameraSpace.l.z);
+  }
+#endif
 
   // process effects (easy)
   for(EffectJob *job=EffectJobs;job;job=job->Next)
@@ -3181,7 +3322,19 @@ void Engine_::BuildPaintJobs()
       NeedCurrentRender[passIndex] = sTRUE;
     
     PaintJob *pjob = Mem.Alloc<PaintJob>();
+#if defined(__EMSCRIPTEN__)
+    // sort like a single-pass mesh job: usages from ENGU_SHADOW up belong
+    // behind the last light. With light slot 0 an ENGU_OTHER effect (all
+    // particle systems) was painted right after the first light, before
+    // the texture pass and the specular add: its quads write alpha 1, which
+    // the specular add turned into solid white squares.
+    sInt lightId = (effect->Usage < ENGU_SHADOW) ? 0 : MAXLIGHT-1;
+    pjob->SortKey = (passIndex << 24) | (lightId << 20) | (effect->Usage << 16);
+    if(Build04)
+      pjob->SortKey = (Usage04(effect->Usage) << 28) | (passIndex << 20);
+#else
     pjob->SortKey = (passIndex << 24) | (effect->Usage << 16);
+#endif
     pjob->JobId = -1;
     pjob->Light = 0;
     pjob->EffJob = job;
@@ -3189,6 +3342,17 @@ void Engine_::BuildPaintJobs()
     *PaintJobs.Add() = pjob;
   }
 
+#if defined(__EMSCRIPTEN__)
+  // debug: window.__kkFindMtrl = <operator index> collects where meshes with
+  // that material are (paint all sectors with F11 first); key L goes there
+  static sInt findFrame;
+  GenMaterial *findMtrl = 0;
+  if((findFrame++ % 30) == 0)
+  {
+    sInt op = kkJsInt("__kkFindMtrl");
+    if(op >= 0) findMtrl = (GenMaterial *) kkOpCache(op);
+  }
+#endif
   // process meshes (not so easy)
   for(MeshJob *job=MeshJobs;job;job=job->Next)
   {
@@ -3242,6 +3406,30 @@ void Engine_::BuildPaintJobs()
         sAABox bbox;
         bbox.Rotate34(mesh->Jobs[jobId].BBox,Matrices[matrixId]);
         sBool cullVisible = !mesh->Animation && sCullBBox(bbox,Frustum.Planes,5);
+#if defined(__EMSCRIPTEN__)
+        extern sInt kkNoFrustumCull, kkDumpJobs, kkOnlyMtrl;
+        extern sVector kkFoundPos[64]; extern sInt kkFoundCount;
+        if(findMtrl && meshMat->Material == findMtrl && usage == ENGU_BASE)
+        {
+          sVector c; c.Add3(bbox.Min,bbox.Max); c.Scale3(0.5f); c.w = 1;
+          sBool known = sFALSE;
+          for(sInt f=0;f<kkFoundCount;f++) if(kkFoundPos[f].Distance(c) < 3.0f) known = sTRUE;
+          if(!known && kkFoundCount < 64)
+          {
+            kkFoundPos[kkFoundCount++] = c;
+            fprintf(stderr,"[kk] found material at %.2f,%.2f,%.2f\n",c.x,c.y,c.z);
+          }
+        }
+        if(kkNoFrustumCull) cullVisible = sFALSE;       // debug (H)
+        if(kkOnlyMtrl && i != kkOnlyMtrl) continue;     // debug (U)
+        if(kkDumpJobs && usage == ENGU_BASE)            // debug (G)
+        {
+          const sMatrix &mm = Matrices[matrixId];
+          fprintf(stderr,"[kk] job mesh=%p mtrl=%d pass=%d anim=%d cull=%d faces=%d box=%.2f,%.2f,%.2f..%.2f,%.2f,%.2f pos=%.2f,%.2f,%.2f\n",
+                   mesh,i,j,mesh->Animation?1:0,cullVisible,mesh->Jobs[jobId].IndexCount/3,
+                   bbox.Min.x,bbox.Min.y,bbox.Min.z,bbox.Max.x,bbox.Max.y,bbox.Max.z,mm.l.x,mm.l.y,mm.l.z);
+        }
+#endif
 
         if(cullVisible && usage != ENGU_SHADOW)
           continue;
@@ -3253,6 +3441,49 @@ void Engine_::BuildPaintJobs()
         // process material inserts
         if(insert && (!Inserts[passIndex] || insert->GetPriority() > Inserts[passIndex]->GetPriority()))
           Inserts[passIndex] = insert;
+
+#if defined(__EMSCRIPTEN__)
+        if(Build04) // the 2004 layout: see Paint2004
+        {
+          if(usage == ENGU_SHADOW) // cast in the mask stage, visible or not
+          {
+            Shadow04Job *sj = Mem.Alloc<Shadow04Job>();
+            sj->Next = Shadow04Jobs;
+            sj->JobId = jobId;
+            sj->Mesh = mesh;
+            sj->MatrixId = matrixId;
+            sj->Pass = pass;
+            sj->BoneData = boneData;
+            sj->Box = bbox;
+            Shadow04Jobs = sj;
+            Shadow04Count++;
+            continue;
+          }
+
+          // one job per pass; a light pass with specular gets a second job
+          // for the specular pass, which 2004 painted after the texture pass
+          // (usage 4, render pass +2)
+          sBool spec = usage == ENGU_LIGHT && !(((sMaterial11 *) mtrl)->SpecialFlags & sMSF_NOSPECULAR);
+          for(sInt k=0;k<(spec ? 2 : 1);k++)
+          {
+            PaintJob *pjob = Mem.Alloc<PaintJob>();
+            sInt u04 = k ? 4 : Usage04(usage);
+            sInt p04 = k ? sMin(passIndex + 2,ENG_MAXPASS - 1) : passIndex;
+
+            pjob->SortKey = (u04 << 28) | (p04 << 20) | (materialId & 0xfffff);
+            pjob->JobId = jobId;
+            pjob->Mesh = mesh;
+            pjob->MatrixId = matrixId;
+            pjob->Pass = pass;
+            pjob->Light = 0;
+            pjob->Flags = k;
+            pjob->BoneData = boneData;
+
+            *PaintJobs.Add() = pjob;
+          }
+          continue;
+        }
+#endif
 
         // if the usage is per-light, loop through lights
         if(usage >= ENGU_SHADOW && usage <= ENGU_LIGHT)
@@ -3452,3 +3683,294 @@ void Engine_::RenderPaintJobs(KEnvironment *kenv)
 Engine_ *Engine = 0;
 
 /****************************************************************************/
+
+#if defined(__EMSCRIPTEN__)
+sVector kkFoundPos[64];                                   // debug: see __kkFindMtrl in BuildPaintJobs
+sInt kkFoundCount;
+#endif
+
+/****************************************************************************/
+/***                                                                      ***/
+/***   The Breakpoint 2004 renderer (beta data)                           ***/
+/***                                                                      ***/
+/****************************************************************************/
+
+#if defined(__EMSCRIPTEN__)
+
+// The beta's Engine paint (VA 0x817134): the frame is lit by at most four
+// lights, all shadows go into one half-size mask, every lit mesh gets a
+// single four-light pass, and the passes run usage by usage (all z-fills,
+// then all lights, all textures, then specular and the rest) instead of
+// render pass by render pass. See wasm/render2004.cpp for the shading.
+void Engine_::Paint2004(KEnvironment *kenv,sBool specular)
+{
+  EngLight *sel[65];
+  sF32 imp[65];
+  sInt count = 0;
+  EngLight *weapon = 0;
+  sInt weaponTime = 0;
+
+  // importance = range / distance to the camera; beyond 45 units it drops
+  // to 0 and from 35 on the light fades out. The newest weapon light always
+  // comes first, older ones are dropped.
+  for(sInt i=0;i<Lights04Count;i++)
+  {
+    EngLight *l = &Lights04[i];
+    sF32 d = l->Position.Distance(Env.CameraSpace.l);
+    sF32 importance = l->Range / sMax(d,0.1f);
+    if(d >= 45.0f)
+      importance = 0.0f;
+    else if(d >= 35.0f)
+      l->Amplify *= (45.0f - d) * 0.1f;
+
+    if(l->Flags & EL_WEAPON)
+    {
+      sInt t = l->Event ? l->Event->Start : 0;
+      if(!weapon || t > weaponTime)
+      {
+        weapon = l;
+        weaponTime = t;
+      }
+    }
+    else
+    {
+      sel[count] = l;
+      imp[count] = importance;
+      count++;
+    }
+  }
+  if(weapon)
+  {
+    sel[count] = weapon;
+    imp[count] = 1e20f;
+    count++;
+  }
+
+  // bubble sort, most important first (stable, like the original)
+  for(sBool swapped=sTRUE;swapped;)
+  {
+    swapped = sFALSE;
+    for(sInt i=0;i+1<count;i++)
+    {
+      if(imp[i] < imp[i+1])
+      {
+        sSwap(imp[i],imp[i+1]);
+        sSwap(sel[i],sel[i+1]);
+        swapped = sTRUE;
+      }
+    }
+  }
+  if(count > 4)
+    count = 4;
+
+  // up to three shadow casting lights move to the front: they get the
+  // mask channels a, b and g; the fourth slot is never shadowed
+  sInt shadows = -1;
+  if(count > 0 && (UsageMask & (1 << ENGU_SHADOW)))
+  {
+    shadows = 0;
+    for(sInt i=0;i<count && shadows<3;i++)
+    {
+      if(sel[i]->Flags & EL_SHADOW)
+      {
+        sSwap(sel[i],sel[shadows]);
+        shadows++;
+      }
+    }
+  }
+
+  Build04 = sTRUE;
+  Shadow04Jobs = 0;
+  Shadow04Count = 0;
+  BuildPaintJobs();
+  Build04 = sFALSE;
+
+  if(kkExecTrace)
+  {
+    KKLOG("[kk] 2004 paint: %d lights (%d raw, %d shadowed), %d jobs, %d shadow jobs\n",
+          count,Lights04Count,shadows,PaintJobs.Count,Shadow04Count);
+    for(sInt i=0;i<count;i++)
+      KKLOG("[kk]   light %d pos=%.2f,%.2f,%.2f col=%08x amp=%.3f range=%.2f flags=%x\n",i,
+            sel[i]->Position.x,sel[i]->Position.y,sel[i]->Position.z,sel[i]->Color,sel[i]->Amplify,sel[i]->Range,sel[i]->Flags);
+  }
+
+  SortPaintJobs();
+  ApplyViewProject();
+  RenderPaintJobs2004(kenv,sel,count,shadows,specular);
+}
+
+void Engine_::RenderPaintJobs2004(KEnvironment *kenv,EngLight **lights,sInt count,sInt shadows,sBool specular)
+{
+  EngPaintInfo paintInfo;
+  sSetMem(&paintInfo,0,sizeof(paintInfo));
+  sBool shots = count > 0 && kkTakeFlag("__kk04Shots");   // debug: save every stage
+
+  // the four light slots (unused ones have no amplify)
+  kk04Light slots[4];
+  for(sInt i=0;i<4;i++)
+  {
+    if(i < count)
+    {
+      slots[i].Pos = lights[i]->Position;
+      slots[i].Color.InitColor(lights[i]->Color);
+      slots[i].Range = lights[i]->Range;
+      slots[i].Amplify = lights[i]->Amplify;
+    }
+    else
+    {
+      slots[i].Pos = Env.CameraSpace.l;
+      slots[i].Color.Init(0,0,0,0);
+      slots[i].Range = 1.0f;
+      slots[i].Amplify = 0.0f;
+    }
+  }
+  sBool lit = count > 0 && (UsageMask & (1 << ENGU_LIGHT));
+
+  // ---- shadow mask: half the view size, z-filled by the base passes (they
+  // write their colour and alpha 0, which the light pass then reads as the
+  // mask of lights 0-2), one channel added per shadow light where its
+  // volumes left the stencil at 0
+  sInt mask = sINVALID;
+  if(lit)
+  {
+    static const sU32 clear[4] = { 0xffffffff,0x00ffffff,0x00ffff00,0x00ff0000 };
+    sViewport view = sSystem->CurrentViewport;
+    mask = kk04MaskTexture(sMax(sSystem->ViewportX/2,1),sMax(sSystem->ViewportY/2,1));
+
+    sViewport mv;
+    mv.InitTex(mask);
+    sSystem->SetViewport(mv);
+    sSystem->SetScissor(0);
+
+    if(shadows >= 0)
+    {
+      sSystem->Clear(sVCF_ALL,clear[shadows]);
+      ApplyViewProject();
+
+      for(sInt i=0;i<PaintJobs.Count;i++)
+      {
+        PaintJob *job = PaintJobs[i];
+        if((job->SortKey >> 28) != 0) break;
+        if(job->JobId == -1) continue;
+        Env.ModelSpace = Matrices[job->MatrixId];
+        paintInfo.BoneData = job->BoneData;
+        job->Pass->Mtrl->Set(Env);
+        job->Mesh->PaintJob(job->JobId,job->Pass,paintInfo);
+      }
+
+      for(sInt s=0;s<shadows;s++)
+      {
+        EngLight *l = lights[s];
+
+        // what InsertLightJob prepares for the later engine's shadow passes
+        sFRect rect;
+        sInt drawn = 0;
+        CalcSphereBounds(l->Position,l->Range,rect,View,&Env.ZoomX);
+        if(rect.XSize() > 0.0f && rect.YSize() > 0.0f)
+        {
+          l->LightRect = rect;
+          l->SVFrustum.FromViewProject(ViewProject,rect);
+          l->SVFrustum.EnlargeToInclude(l->Position);
+          l->ZFailCull.ZFailVolume(l->Position,Env.CameraSpace,Env.NearClip,&Env.ZoomX,rect);
+
+          Env.LightPos = l->Position;
+          Env.LightColor.InitColor(l->Color);
+          Env.LightRange = l->Range;
+          Env.LightAmplify = l->Amplify;
+
+          for(Shadow04Job *sj=Shadow04Jobs;sj;sj=sj->Next)
+          {
+            if(!sj->Box.IntersectsSphere(l->Position,l->Range) || sCullBBox(sj->Box,l->SVFrustum.Planes,5))
+              continue;
+
+            Env.ModelSpace = Matrices[sj->MatrixId];
+            sMatrix mat = Env.ModelSpace;
+            mat.TransR();
+            paintInfo.LightPos.Rotate34(mat,l->Position);
+            paintInfo.LightRange = l->Range;
+            paintInfo.LightId = l->Id;
+            paintInfo.StencilFlags = sCullBBox(sj->Box,l->ZFailCull.Planes,l->ZFailCull.NPlanes) ? 0 : sMBF_STENCILZFAIL;
+            paintInfo.BoneData = sj->BoneData;
+
+            sj->Pass->Mtrl->Set(Env);
+            sj->Mesh->PaintJob(sj->JobId,sj->Pass,paintInfo);
+            drawn++;
+          }
+          sMaterial11::SetShadowStates(0);
+        }
+        if(kkExecTrace)
+          KKLOG("[kk] 2004 mask: light %d rect=%.2f,%.2f..%.2f,%.2f volumes=%d of %d\n",s,rect.x0,rect.y0,rect.x1,rect.y1,drawn,Shadow04Count);
+
+        kk04MaskChannel(s);
+        sSystem->Clear(sVCF_STENCIL);
+        ApplyViewProject();
+      }
+    }
+    else
+      sSystem->Clear(sVCF_COLOR,0xffffffff);
+
+    if(shots) kk04Capture("mask");
+    sSystem->SetViewport(view);
+    ApplyViewProject();
+  }
+
+  // ---- the view, usage by usage
+  sInt curUsage = -1,curPass = -1;
+  for(sInt i=0;i<PaintJobs.Count;i++)
+  {
+    PaintJob *job = PaintJobs[i];
+    sInt usage = job->SortKey >> 28;
+    sInt pass = (job->SortKey >> 20) & (ENG_MAXPASS - 1);
+    sBool light = job->JobId != -1 && job->Pass->Usage == ENGU_LIGHT;
+
+    if(light && (!lit || (job->Flags && !specular)))
+      continue;
+
+    if(usage != curUsage || pass != curPass)
+    {
+      if(shots && curUsage >= 0 && (usage != curUsage || curUsage == 4))
+      {
+        static const char *names[5] = { "zfill","shadow","light","texture","other" };
+        sChar name[32];
+        snprintf(name,sizeof(name),"%s_p%d",names[curUsage],curPass);
+        kk04Capture(name);
+      }
+      sSystem->SetScissor(0);
+      if(usage == 4 && (pass != curPass || usage != curUsage) && NeedCurrentRender[pass])
+        RenderTargetManager->GrabToTarget(0x00000000);
+      curUsage = usage;
+      curPass = pass;
+    }
+
+    if(shots && usage == 4 && !(job->JobId != -1 && job->Flags))
+      KKLOG("[kk] 2004 u4 pass=%d %s usage=%d base=%08x\n",pass,job->JobId == -1 ? "effect" : "mesh",
+            job->JobId == -1 ? -1 : job->Pass->Usage,job->JobId == -1 ? 0 : ((sMaterial11 *) job->Pass->Mtrl)->BaseFlags);
+
+    if(job->JobId != -1) // it's a mesh
+    {
+      Env.ModelSpace = Matrices[job->MatrixId];
+      paintInfo.BoneData = job->BoneData;
+
+      if(light)
+        kk04SetLight(Env,(sMaterial11 *) job->Pass->Mtrl,job->Flags ? KK04_SPECULAR : KK04_DIFFUSE,slots,mask);
+      else
+        job->Pass->Mtrl->Set(Env);
+      job->Mesh->PaintJob(job->JobId,job->Pass,paintInfo);
+    }
+    else // it's an effect
+    {
+      EffectJob *ejob = job->EffJob;
+      sCopyMem(&kenv->Var[ejob->VarStart],ejob->Animation,ejob->VarCount*sizeof(sVector));
+
+      kenv->ExecStack.Push(ejob->Matrix);
+      ejob->Op->ExecWithNewMem(kenv,&ejob->Op->SceneMemLink);
+      kenv->ExecStack.Pop();
+
+      ApplyViewProject();
+    }
+  }
+  sSystem->SetScissor(0);
+  if(shots) kk04Capture("other");
+}
+
+#endif

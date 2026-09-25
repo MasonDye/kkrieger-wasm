@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>.kkrieger</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#ccc;font:13px/1.4 monospace;overflow:hidden}
+  #wrap{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
+  /* fill the window (or the screen in fullscreen), keep the aspect; !important
+     because SDL writes an inline CSS size when the game sets its resolution */
+  canvas{display:block;background:#000;image-rendering:auto;outline:none;
+         width:100vw !important;height:100vh !important;object-fit:contain}
+  #start{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;
+         background:rgba(0,0,0,.85);cursor:pointer;font-size:20px;color:#fff;letter-spacing:.1em}
+  #start small{display:block;margin-top:12px;font-size:12px;color:#999;letter-spacing:0}
+  #status{display:block;margin-top:10px;font-size:12px;color:#e8a030;letter-spacing:0;white-space:pre}
+  .opt{display:block;margin-top:14px;font-size:13px;color:#bbb;letter-spacing:0;cursor:default}
+  .opt select{margin-left:8px;font:13px monospace;background:#111;color:#eee;border:1px solid #555;padding:3px 6px}
+  .opt input{vertical-align:middle;margin-right:6px}
+  #fs{position:fixed;top:8px;right:8px;z-index:5;font:12px monospace;color:#ddd;background:rgba(20,20,20,.55);
+      border:1px solid #444;padding:4px 8px;cursor:pointer;opacity:.35;transition:opacity .2s}
+  #fs:hover{opacity:1}
+  :fullscreen #fs{display:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="canvas" width="1024" height="576" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+</div>
+<button id="fs" title="fullscreen (Esc or the button leaves it)">&#x26F6; fullscreen</button>
+<div id="start"><div>click to start<small>WebGL2 · procedural content is generated on load, please wait</small>
+  <span id="status">loading…</span>
+  <label class="opt" id="resbox">resolution<select id="res"></select></label>
+  <label class="opt" id="fsbox"><input type="checkbox" id="fsstart">start in fullscreen</label></div></div>
+<script>
+  var statusEl = document.getElementById('status');
+  // The game's log goes to the browser console only (F12). window.__kkLog
+  // keeps the lines for wasm/cdp.js ("log:<regex>" steps); nothing is drawn
+  // into the page.
+  window.__kkLog = [];
+  function kkLog(t){
+    window.__kkLog.push(t);
+    if(window.__kkLog.length > 200000) window.__kkLog.splice(0, 50000);
+  }
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print: function(t){ console.log(t); kkLog(t); },
+    printErr: function(t){
+      // the engine logs to stderr throughout; only real failures go out as errors
+      if(/AddressSanitizer|Aborted|RuntimeError|FATAL|segmentation|failed|error 0x/i.test(t)) console.error(t);
+      else console.log(t);
+      // A sanitizer/abort message arrives synchronously from inside the wasm
+      // call, so a JS stack captured here still shows the wasm frames.
+      if(window.__kkErrs && /AddressSanitizer|Aborted|RuntimeError|FATAL|segmentation/.test(t))
+        window.__kkErrs.push('stderr: ' + t + '\n' + new Error().stack);
+      kkLog('! ' + t);
+    },
+    setStatus: function(t){ if(statusEl && t) statusEl.textContent = t; },   // emscripten clears it with ''
+    noInitialRun: true,
+    onRuntimeInitialized: function(){ if(statusEl) statusEl.textContent = 'ready'; },
+    // "exit .kkrieger" (or shift+esc): a browser page cannot close itself, so
+    // go back to where it all started - the click-to-start screen
+    kkExit: function(){ location.reload(); }
+  };
+
+  // Fullscreen: the button, or the checkbox on the start screen (fullscreen
+  // needs a user gesture, the start click is one). Esc is kept for the game's
+  // own menu where the browser allows it (keyboard lock); holding Esc or the
+  // button leaves fullscreen.
+  function enterFullscreen(){
+    var el = document.documentElement;
+    var p = el.requestFullscreen ? el.requestFullscreen({navigationUI: 'hide'}) : null;
+    if(p && p.then) p.then(function(){
+      try { if(navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock(['Escape']); } catch(e) {}
+    }).catch(function(){});
+    Module.canvas.focus();
+  }
+  document.getElementById('fs').addEventListener('click', function(e){
+    e.stopPropagation();
+    if(document.fullscreenElement) document.exitFullscreen(); else enterFullscreen();
+  });
+
+  // Resolution: picked here, before the game generates its render targets
+  // (the full-screen ones are sized to it). 'fit' uses the window (or the
+  // screen when starting in fullscreen) in device pixels; the game view is a
+  // 2:1 band centred on the screen. ?res=WxH overrides, the choice is
+  // remembered in localStorage.
+  var RES = [['fit','fit window'], ['800x600','800 × 600'], ['1024x768','1024 × 768 (original)'],
+             ['1280x960','1280 × 960'], ['1600x1200','1600 × 1200'], ['1280x720','1280 × 720'],
+             ['1920x1080','1920 × 1080'], ['2560x1440','2560 × 1440']];
+  var resSel = document.getElementById('res');
+  var fsStart = document.getElementById('fsstart');
+  var resWanted = new URLSearchParams(location.search).get('res');
+  if(!resWanted) { try { resWanted = localStorage.getItem('kkRes'); } catch(e) {} }
+  if(!resWanted) resWanted = '1024x768';
+  try { fsStart.checked = localStorage.getItem('kkFullscreen') === '1'; } catch(e) {}
+  RES.forEach(function(r){ var o = document.createElement('option'); o.value = r[0]; o.textContent = r[1]; resSel.appendChild(o); });
+  if(!RES.some(function(r){ return r[0] === resWanted; })) {
+    var o = document.createElement('option'); o.value = resWanted; o.textContent = resWanted.replace('x', ' × '); resSel.appendChild(o);
+  }
+  resSel.value = resWanted;
+  ['resbox', 'fsbox'].forEach(function(id){
+    ['click', 'mousedown'].forEach(function(ev){ document.getElementById(id).addEventListener(ev, function(e){ e.stopPropagation(); }); });
+  });
+  resSel.addEventListener('change', function(){ try { localStorage.setItem('kkRes', resSel.value); } catch(e) {} });
+  fsStart.addEventListener('change', function(){ try { localStorage.setItem('kkFullscreen', fsStart.checked ? '1' : '0'); } catch(e) {} });
+  function pickedRes(){
+    var v = resSel.value;
+    if(v === 'fit') {
+      var d = window.devicePixelRatio || 1;
+      var w = fsStart.checked ? screen.width : window.innerWidth;
+      var h = fsStart.checked ? screen.height : window.innerHeight;
+      return [Math.round(w * d) & ~1, Math.round(h * d) & ~1];
+    }
+    var m = /^(\d+)x(\d+)$/.exec(v);
+    return m ? [+m[1], +m[2]] : [1024, 768];
+  }
+
+  document.getElementById('start').addEventListener('click', function(){
+    if(fsStart.checked) enterFullscreen();
+    Module.kkRes = pickedRes();
+    this.remove();
+    statusEl = null;
+    Module.canvas.focus();
+    // default: the Breakpoint 2004 release data, converted by wasm/tools/kxconv.py;
+    // ?data=3383 plays data/kkrieger3383.kx (a later development snapshot)
+    var data = new URLSearchParams(location.search).get('data');
+    Module.callMain(data === '3383' ? [] : ['/kkrieger_beta.kx']);
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

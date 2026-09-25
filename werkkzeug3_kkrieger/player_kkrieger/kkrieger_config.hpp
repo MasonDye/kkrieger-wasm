@@ -11,7 +11,7 @@
 // Compile Options
 
 #define sNEWCONFIG        1
-#define sINTRO            1                         // compile for small size
+#define sINTRO            0                         // compile for small size
 #define sPLAYER           1                         // this is a player, not the tool.
 #define sPROFILE          0                         // include profiling code
 #define sUNICODE          0                         // define sCHAR as 16bit

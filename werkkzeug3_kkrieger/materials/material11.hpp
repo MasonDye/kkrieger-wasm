@@ -203,6 +203,7 @@ public:
   void CopyFrom(const sMaterial11 *x);
   void DefaultCombiner(sBool *tex=0); // set combiner to defaults, tex holds an array of bools if the textures are set.
   void SetTex(sInt i,sInt handle);
+  sInt GetTex(sInt i) const { return Tex[i]; }
 
   sBool Compile();
   void Set(const sMaterialEnv &env);

@@ -1,6 +1,12 @@
 // This file is distributed under a BSD license. See LICENSE.txt for details.
 
 #include "kkriegergame.hpp"
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+extern sInt kkBetaData;                     // kdoc.cpp: converted Breakpoint 2004 data
+extern "C" int kkJsFlag(const char *name);  // _start_wasm.cpp: window[name] set?
+extern "C" int kkJsVec(const char *name,float *out,int n);   // _start_wasm.cpp: take a number array
+#endif
 #include "genmesh.hpp"
 #include "engine.hpp"
 #include "genoverlay.hpp"
@@ -244,6 +250,11 @@ void KKriegerGame::Init()
   Switches[KGS_ONE] = 1;
   Switches[KGS_GLARE] = 2;
   Switches[KGS_RESOLUTION] = 1;
+#if defined(__EMSCRIPTEN__)
+  { extern sInt kkBetaData;                  // the 2004 beta ran at 1024x768: its 1024x512 render
+    if(kkBetaData)                           // targets map 1:1 onto the letterboxed view
+      Switches[KGS_RESOLUTION] = 2; }
+#endif
   Switches[KGS_TEXTURES] = 1;
   Switches[KGS_SHADOWS] = 1;
   Switches[KGS_MOUSESPEED] = 5;
@@ -397,6 +408,9 @@ void KKriegerGame::SetPainter(KOp *op,KEnvironment *kenv)
     else if(op->CheckOutput(KC_SCENE))
     {
       SetScene((GenScene *)op->Cache);
+#if defined(__EMSCRIPTEN__)
+      fprintf(stderr,"[kk] setpainter: scene found, cells=%d cellzone=%d\n",CellList.Count,CellZone.Count);
+#endif
       break;
     }
     else
@@ -512,6 +526,11 @@ void KKriegerGame::SetPlayer(const sVector &p,sF32 d,sF32 l)
   PlayerDir = d;
   PlayerLook = l;
   PlayerCell = FindCell(PlayerPos);
+#if defined(__EMSCRIPTEN__)
+  fprintf(stderr,"[kk] setplayer p=(%.2f %.2f %.2f) start=(%.2f %.2f %.2f) cell=%p celllist=%d celladd=%d\n",
+          p.x,p.y,p.z,PlayerStartPos.x,PlayerStartPos.y,PlayerStartPos.z,
+          (void *)PlayerCell,CellList.Count,CellAdd.Count);
+#endif
   if(PlayerCell==0 && CellAdd.Count>0)
   {
     PlayerCell = CellAdd[0];
@@ -850,6 +869,106 @@ sBool KKriegerGame::OnKey(sU32 key)
   case 'Y':
     FlyMode = !FlyMode;
     return sTRUE;
+
+#if defined(__EMSCRIPTEN__)
+  case 'o':                                 // debug: stand next to the next collectable, facing it
+  case 'O':
+    {
+      static sInt next;
+      for(sInt n=0;n<CellZone.Count;n++)
+      {
+        KKriegerCell *c = CellZone[(next+n)%CellZone.Count];
+        if(!c->Event[0] || c->Respawn!=0) continue;
+        next = (next+n+1)%CellZone.Count;
+        sVector at,p;
+        at.Add3(c->BBMin,c->BBMax);
+        at.Scale3(0.5f);
+        at.w = 1;
+        static const sF32 offs[4][2] = { {0,4},{0,-4},{4,0},{-4,0} };
+        sBool found = sFALSE;
+        for(sInt side=0;side<4 && !found;side++)      // first spot beside the box that is inside the level
+        {
+          p = at;
+          p.x += offs[side][0];
+          p.z += offs[side][1];
+          for(sF32 dy=0;dy<6 && !found;dy+=0.25f)
+          {
+            p.y = c->BBMin.y+dy;
+            if(FindCell(p)) { p.y += 1.75f; found = sTRUE; }   // floor + player height
+          }
+        }
+        if(!found) continue;
+        fprintf(stderr,"[kk] item zone %d at (%.2f %.2f %.2f) logic %02x/%d\n",(next+CellZone.Count-1)%CellZone.Count,
+                at.x,at.y,at.z,c->Logic.Code,c->Logic.Output);
+        SetPlayer(p,sFATan2(at.x-p.x,at.z-p.z),0);
+        break;
+      }
+    }
+    return sTRUE;
+#endif
+
+#if defined(__EMSCRIPTEN__)
+  case 'l':                                 // debug: go to the next place __kkFindMtrl was found (engine.cpp)
+  case 'L':
+    {
+      extern sVector kkFoundPos[64]; extern sInt kkFoundCount;
+      static sInt next;
+      for(sInt n=0;n<kkFoundCount;n++)
+      {
+        sVector at = kkFoundPos[(next+n)%kkFoundCount], p;
+        sBool found = sFALSE;
+        for(sInt a=0;a<16 && !found;a++)
+        {
+          p = at;
+          p.x += sFCos(a*sPI2F/16)*4.0f;
+          p.z += sFSin(a*sPI2F/16)*4.0f;
+          for(sF32 dy=-4;dy<4 && !found;dy+=0.25f)
+          {
+            sVector q = p; q.y = at.y+dy;
+            if(FindCell(q)) { p = q; p.y += 1.75f; found = sTRUE; }
+          }
+        }
+        if(!found) continue;
+        next = (next+n+1)%kkFoundCount;
+        fprintf(stderr,"[kk] goto found %d (%.2f %.2f %.2f)\n",(next+kkFoundCount-1)%kkFoundCount,at.x,at.y,at.z);
+        SetPlayer(p,sFATan2(at.x-p.x,at.z-p.z),0);
+        break;
+      }
+    }
+    return sTRUE;
+#endif
+
+#if defined(__EMSCRIPTEN__)
+  case 'p':                                 // debug: stand 10 units from the next ranged monster, facing it
+  case 'P':
+    {
+      static sInt next;
+      for(sInt n=0;n<Monsters.Count;n++)
+      {
+        KKriegerMonster *m = Monsters[(next+n)%Monsters.Count];
+        if(m->WeaponKind<0 || m->Life<=0) continue;
+        sVector at = m->Collider.Pos, p;
+        sBool found = sFALSE;
+        for(sInt a=0;a<16 && !found;a++)
+        {
+          p = at;
+          p.x += sFCos(a*sPI2F/16)*10.0f;
+          p.z += sFSin(a*sPI2F/16)*10.0f;
+          for(sF32 dy=-2;dy<4 && !found;dy+=0.25f)
+          {
+            sVector q = p; q.y = at.y+dy;
+            if(FindCell(q)) { p = q; p.y += 1.75f; found = sTRUE; }
+          }
+        }
+        if(!found) continue;
+        next = (next+n+1)%Monsters.Count;
+        fprintf(stderr,"[kk] monster at (%.2f %.2f %.2f) weapon %d life %d state %d\n",at.x,at.y,at.z,m->WeaponKind,m->Life,m->State);
+        SetPlayer(p,sFATan2(at.x-p.x,at.z-p.z),0);
+        break;
+      }
+    }
+    return sTRUE;
+#endif
 
   case sKEY_SHIFTL:
     Player.UseKey = 1;
@@ -1290,12 +1409,18 @@ void KKriegerGame::OnTick(KEnvironment *kenv,sInt slices)
 
   if(Player.FireKey)
   {
-    if(!Player.Ammo[Player.CurrentWeapon/2] && Player.CurrentWeapon!=0)
+#if defined(__EMSCRIPTEN__)
+    extern sInt kkBetaData;                  // 2004 (0x81e0bf): the first weapon used ammo like the others
+    sBool infinite = Player.CurrentWeapon==0 && !kkBetaData;
+#else
+    sBool infinite = Player.CurrentWeapon==0;
+#endif
+    if(!Player.Ammo[Player.CurrentWeapon/2] && !infinite)
       PlayerSound(15,0.8f);
 
-    if((Player.Ammo[Player.CurrentWeapon/2]>0 || Player.CurrentWeapon==0) && Player.CurrentWeapon==Player.NextWeapon && Player.CoolTimer<=0 && WeaponTimer>=0.25f)
+    if((Player.Ammo[Player.CurrentWeapon/2]>0 || infinite) && Player.CurrentWeapon==Player.NextWeapon && Player.CoolTimer<=0 && WeaponTimer>=0.25f)
     {
-      if(Player.CurrentWeapon!=0)
+      if(!infinite)
         Player.Ammo[Player.CurrentWeapon/2]--;
       Player.CoolTimer = WeaponCool[Player.CurrentWeapon];
       if(!(WeaponFlags[Player.CurrentWeapon]&KWF_CONTINUOUS))
@@ -1419,6 +1544,45 @@ void KKriegerGame::OnTick(KEnvironment *kenv,sInt slices)
       sZONE(GameAI);
     #endif
   
+#if defined(__EMSCRIPTEN__)
+      { // debug: window.__kkTeleport = [x,y,z,dir,look] puts the player there (collider position,
+        // same frame as the 2004 player's, see wasm/tools/origprobe.py); window.__kkWhere logs it
+        static sInt poll;
+        if((poll++ % 20) == 0)
+        {
+          float tp[5];
+          if(kkJsVec("__kkTeleport",tp,5) == 5)
+          {
+            sVector p; p.Init(tp[0],tp[1],tp[2],1);
+            SetPlayer(p,tp[3],tp[4]);
+            fprintf(stderr,"[kk] teleport (%.3f %.3f %.3f) dir %.3f look %.3f\n",tp[0],tp[1],tp[2],tp[3],tp[4]);
+          }
+          if(kkJsFlag("__kkWhere"))
+            fprintf(stderr,"[kk] where pos=(%.3f %.3f %.3f) dir=%.4f look=%.4f\n",PlayerPos.x,PlayerPos.y,PlayerPos.z,PlayerDir,PlayerLook);
+          // debug: window.__kkSwitch = [index,value] sets a game switch (1 = 4 shows the end screen)
+          if(kkJsVec("__kkSwitch",tp,2) == 2)
+          {
+            Switches[((sInt)tp[0])&255] = (sInt)tp[1];
+            fprintf(stderr,"[kk] switch %d = %d\n",((sInt)tp[0])&255,(sInt)tp[1]);
+          }
+        }
+      }
+      { static sInt tick, on = -1;           // debug: window.__kkMonLog prints active monsters every 5 ticks
+        if(on < 0 || (tick % 100) == 0) on = kkJsFlag("__kkMonLog");
+        if(on && (tick % 5) == 0)
+        {
+          sChar line[512]; sInt n = sprintf(line,"[kk] mon tick=%d life=%d",tick,Player.Life);
+          for(sInt m=0;m<Monsters.Count && n<440;m++)
+          {
+            KKriegerMonster *mm = Monsters[m];
+            if(mm->State!=KMS_ACTIVE) continue;
+            n += sprintf(line+n," | %d (%.2f %.2f %.2f) mt %.2f",m,mm->Collider.Pos.x,mm->Collider.Pos.y,mm->Collider.Pos.z,mm->MeeleeTimer);
+          }
+          fprintf(stderr,"%s\n",line);
+        }
+        tick++; }
+      if(!kkBetaData)                        // 2004: monsters block each other instead (see MoveCollider)
+#endif
       MonsterMagnetAI();
 
       for(i=0;i<Monsters.Count;i++)
@@ -1602,6 +1766,10 @@ void KKriegerGame::Zones(KEnvironment *kenv)
         break;
       }
 
+#if defined(__EMSCRIPTEN__)
+      if(action && (cell->Logic.Code&0xf0)>=KKEE_COLLECT && (cell->Logic.Code&0xf0)<=KKEE_RESPAWN3)
+      { extern void kkTraceSoon(sInt); kkTraceSoon(3); }   // debug: window.__kkTracePickup
+#endif
       valp = (&Player.Life)+(cell->Logic.Output&15);
       switch(cell->Logic.Code&0x0f)
       {
@@ -1728,10 +1896,23 @@ void KKriegerGame::OnOptionsChanged()
   sInt res = Switches[KGS_RESOLUTION];
 
 #if sPLAYER
+#if defined(__EMSCRIPTEN__)
+  // a resolution picked on the page overrides the game's switch
+  extern sInt kkForcedResX,kkForcedResY;
+  sInt wantX = kkForcedResX ? kkForcedResX : xRes[res];
+  sInt wantY = kkForcedResX ? kkForcedResY : yRes[res];
+  // the canvas starts out at the page's size, which may share its width with
+  // a mode (1024x576 vs 1024x768): compare both dimensions
+  if(wantX != sSystem->ConfigX || wantY != sSystem->ConfigY)
+  {
+    sSystem->ConfigX = wantX;
+    sSystem->ConfigY = wantY;
+#else
   if(xRes[res] != sSystem->ConfigX) // resolution changed?
   {
     sSystem->ConfigX = xRes[res];
     sSystem->ConfigY = yRes[res];
+#endif
 
     sSystem->InitScreens();
   }
@@ -1743,6 +1924,13 @@ void KKriegerGame::OnOptionsChanged()
 
 void KKriegerGame::GetCamera(sMaterialEnv &env)
 {
+#if defined(__EMSCRIPTEN__)
+  { extern sInt kkExecTrace;
+    if(kkExecTrace)
+      fprintf(stderr,"[kk] player pos=(%.2f %.2f %.2f) cam=(%.2f %.2f %.2f) ground=%d cell=%p life=%d\n",
+              PlayerPos.x,PlayerPos.y,PlayerPos.z,CamPos.x,CamPos.y,CamPos.z,
+              (sInt)OnGround,(void *)PlayerCell,Player.Life); }
+#endif
   if(CamZoomPos)
   {
     env.CameraSpace.InitEuler(0,PlayerDir,0);
@@ -2382,6 +2570,9 @@ void KKriegerGame::MonsterAI(KKriegerMonster *mon,KEnvironment *kenv,sBool machi
       {
         mon->MeeleeTimer = 0.0f;
         Player.Hit(mon->MeeleeHits);
+#if defined(__EMSCRIPTEN__)
+        fprintf(stderr,"[kk] melee t=%d monster=%p hits=%d life=%d\n",sSystem->GetTime(),(void *)mon,mon->MeeleeHits,Player.Life);
+#endif
       }
     }
     else
@@ -2441,7 +2632,15 @@ void KKriegerGame::MonsterAI(KKriegerMonster *mon,KEnvironment *kenv,sBool machi
       speed.Add3(mon->MagnetForce);
       speed.y = 0;
       speed.w = 0;
+#if defined(__EMSCRIPTEN__)
+      // 2004 monsters were verlet particles damped like the player on the
+      // ground (DampPlayerGround, 0.05): a spider at speed 1 settles at
+      // 20x its step, 2 units/s (measured in the original under Wine).
+      // The later AI keeps 0.9 of the last step, half that pace.
+      speed.AddScale3(v,kkBetaData ? 1.0f-DampPlayerGround : 0.9f);
+#else
       speed.AddScale3(v,0.9f);
+#endif
 
       mon->HitCell.Mode |= KCM_DISABLED;
       if(CollideRay(cell,p1,p0,ci))
@@ -2996,7 +3195,14 @@ sBool KKriegerGame::MoveCollider(KKSolidCollider &collider, const sVector &v,sIn
   CollideSoftSphereAdd(sphere, list, count);
   for(i = 0; i < DCellUsed; i++)
   {
+#if defined(__EMSCRIPTEN__)
+    // 2004 monster hit cells were solid (mode 1, exec_11 at 0x81d97d), so a
+    // spider queued up behind another instead of squeezing past it and
+    // biting at the same time; the later game only lets them repel softly
+    if((who & KCRF_ISMONSTER) && DCellPtr[i]->Monster && (!kkBetaData || &DCellPtr[i]->Monster->Collider == &collider)) continue;
+#else
     if((who & KCRF_ISMONSTER) && DCellPtr[i]->Monster) continue;
+#endif
     if((who & KCRF_ISPLAYER)  && DCellPtr[i] == &Player.HitCell) continue;
 
     CollideSoftSphereSub(sphere, DCellPtr[i]);
@@ -3208,7 +3414,14 @@ sBool KKriegerGame::CheckSphereVsEdge(const sVector &sphere, const sVector &v1, 
   return sTRUE;
 }
 
+#if defined(__EMSCRIPTEN__)
+// 1024 is tight: deep splits (one recursion level per cell plane) overflow it
+// with slightly different float rounding, and the overflow lands on
+// SplitHeapIndex right behind the array.
+#define SPLITHEAPMAX 16384
+#else
 #define SPLITHEAPMAX 1024
+#endif
 sVector SplitHeapVector[2][SPLITHEAPMAX];
 sInt SplitHeapIndex[2];
 
@@ -3288,7 +3501,34 @@ sBool KKriegerGame::SplitCollisionFace(const GenSimpleFace &face, const sVector 
 
   sides[0].Vertices = &SplitHeapVector[0][SplitHeapIndex[0]];
   sides[1].Vertices = &SplitHeapVector[1][SplitHeapIndex[1]];
+  sides[0].VertexCount = 0;         // GenSimpleFace is a POD; Clip() appends
+  sides[1].VertexCount = 0;
+#if defined(__EMSCRIPTEN__)
+  if(face.VertexCount < 0 || face.VertexCount > 64 ||
+     SplitHeapIndex[0] + face.VertexCount + 2 > SPLITHEAPMAX ||
+     SplitHeapIndex[1] + face.VertexCount + 2 > SPLITHEAPMAX)
+  {
+    static sInt logged; if(logged++ < 4)
+      fprintf(stderr,"[kk] SplitCollisionFace: heap exhausted (verts=%d idx=%d,%d plane=%d/%d)\n",face.VertexCount,SplitHeapIndex[0],SplitHeapIndex[1],plane,nPlanes);
+    return sTRUE;                       // keep the face unsplit rather than corrupt memory
+  }
+#endif
   face.Clip(planes[plane], sides);
+#if defined(__EMSCRIPTEN__)
+  if(sides[0].VertexCount < 0 || sides[0].VertexCount > face.VertexCount + 2 ||
+     sides[1].VertexCount < 0 || sides[1].VertexCount > face.VertexCount + 2)
+  {
+    static sInt logged; if(logged++ < 4)
+    {
+      fprintf(stderr,"[kk] SplitCollisionFace: Clip produced %d/%d verts from %d (plane %d/%d: %f %f %f %f)\n",
+              sides[0].VertexCount,sides[1].VertexCount,face.VertexCount,plane,nPlanes,
+              planes[plane].x,planes[plane].y,planes[plane].z,planes[plane].w);
+      for(sInt k=0;k<face.VertexCount && k<8;k++)
+        fprintf(stderr,"[kk]   v%d = %f %f %f %f\n",k,face.Vertices[k].x,face.Vertices[k].y,face.Vertices[k].z,face.Vertices[k].w);
+    }
+    return sTRUE;
+  }
+#endif
   SplitHeapIndex[0] += sides[0].VertexCount;
   SplitHeapIndex[1] += sides[1].VertexCount;
   sVERIFY(SplitHeapIndex[0]<SPLITHEAPMAX)
@@ -3324,6 +3564,15 @@ sBool KKriegerGame::SplitCollisionFace(const GenSimpleFace &face, const sVector 
     {
       if(use[i])
       {
+#if defined(__EMSCRIPTEN__)
+        if(sides[i].VertexCount < 3 || sides[i].VertexCount > 66)
+        {
+          static sInt logged; if(logged++ < 4)
+            fprintf(stderr,"[kk] SplitCollisionFace: absurd side count %d (side %d, face %d verts, plane %d/%d, use=%d,%d)\n",
+                    sides[i].VertexCount,i,face.VertexCount,plane,nPlanes,use[0],use[1]);
+          continue;
+        }
+#endif
         GenSimpleFaceList *NewFace = new GenSimpleFaceList;
         NewFace->Init(sides[i].VertexCount);
         for(j = 0; j < sides[i].VertexCount; j++)

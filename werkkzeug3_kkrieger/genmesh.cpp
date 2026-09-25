@@ -1,6 +1,9 @@
 // This file is distributed under a BSD license. See LICENSE.txt for details.
 
 #include "genmesh.hpp"
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+#endif
 #include "genmaterial.hpp"
 #include "genbitmap.hpp"
 #include "genoverlay.hpp"
@@ -2720,7 +2723,9 @@ void GenMesh::Perlin(const sMatrix &mat,const sVector &amp)
   sInt oldcw;
 
   // setup fpu: single precision, round towards neg. infinity
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+  (void)oldcw;   // wasm has no x87 control word; the sFtol below floors explicitly
+#elif defined(__GNUC__)
   sInt cw = 0x143f;
   asm (
     "fstcw   %0\n\t"
@@ -2751,7 +2756,13 @@ void GenMesh::Perlin(const sMatrix &mat,const sVector &amp)
       t0.Rotate34(mat,*vert);
       for(sInt j=0;j<3;j++)
       {
+#if defined(__EMSCRIPTEN__)
+        // the original relies on the x87 control word set above (round towards
+        // negative infinity), so fistp behaves as floor(). Say so explicitly.
+        is[j] = (sInt)__builtin_floorf(t0[j]);
+#else
         is[j] = sFtol(t0[j]);   // integer coordinate
+#endif
         fs[j] = t0[j] - is[j];  // fractional part
         is[j] &= 255;           // integer grid wraps round 256
         fs[j] = fs[j]*fs[j]*fs[j]*(10.0f+fs[j]*(6.0f*fs[j]-15.0f));
@@ -2783,7 +2794,9 @@ void GenMesh::Perlin(const sMatrix &mat,const sVector &amp)
 	}
 
   // restore fpu state
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+  // nothing to restore
+#elif defined(__GNUC__)
   asm (
     "fldcw   %0\n\t"
     :
@@ -3097,6 +3110,7 @@ sBool CheckMesh(GenMesh *&mesh,sU32 mask)
 
 GenMesh * __stdcall Mesh_Cube(sInt tx,sInt ty,sInt tz,sInt flags,sFSRT srt)
 {
+  const sInt txyz[3] = { tx,ty,tz };   // was (&tx)[j]: x86 stack-layout trick
 	sInt i,j;
   sInt bm;
   sMatrix mat;
@@ -3136,7 +3150,7 @@ GenMesh * __stdcall Mesh_Cube(sInt tx,sInt ty,sInt tz,sInt flags,sFSRT srt)
     mat.Init();
     (&mat.l.x)[j] = 1.0f;
 
-    for(i=1;i<(&tx)[j];i++)
+    for(i=1;i<txyz[j];i++)
     {
       mesh->Extrude(0x00010000,0x00000100);
       mesh->Face2Vert();
@@ -3279,6 +3293,7 @@ GenMesh * __stdcall Mesh_Subdivide(KOp *upd,GenMesh *mesh,sInt mask,sF32 alpha,s
 
 GenMesh * __stdcall Mesh_Extrude(KOp *upd,GenMesh *mesh,sInt smask,sInt dmask,sInt mode,sInt count,sF323 dist,sF323 s,sF323 r)
 {
+  sF32 r_arr[3] = { r.x, r.y, r.z };   // was &r.x spanning 1 by-value params
   sInt i,j,grp,e,ee;
   static sInt stk[4096];
   sMatrix mat;
@@ -3338,7 +3353,7 @@ GenMesh * __stdcall Mesh_Extrude(KOp *upd,GenMesh *mesh,sInt smask,sInt dmask,sI
     dist[i] = dist[i] * ic;
   }
 
-  mat.InitEulerPI2(&r.x);
+  mat.InitEulerPI2(r_arr);
   sInt vs = mesh->VertSize();
   sInt sn = mesh->VertMap(sGMI_NORMAL);
 
@@ -4007,6 +4022,7 @@ GenMesh * __stdcall Mesh_Perlin(KOp *upd,GenMesh *mesh,sInt mask,sFSRT srt,sF323
 
 GenMesh * __stdcall Mesh_Add(sInt count,GenMesh *mesh,...)
 {
+  sVARARGS_INIT(GenMesh *,mesh,count);
   sInt i;
   GenMesh *other;
 
@@ -4014,7 +4030,7 @@ GenMesh * __stdcall Mesh_Add(sInt count,GenMesh *mesh,...)
 
   for(i=1;i<count;i++)
   {
-    other = (&mesh)[i];
+    other = sVARARGS(mesh)[i];
     if(other)
     {
       mesh->Add(other);
@@ -4076,6 +4092,7 @@ GenMesh * __stdcall Mesh_SelectRandom(GenMesh *mesh,sU32 dmask,sInt dmode,sU32 r
 
 GenMesh * __stdcall Mesh_Multiply(KOp *kop,GenMesh *mesh,sFSRT srt,sInt count,sInt mode,sF32 tu,sF32 tv,sF323 lrot,sF32 extrude)
 {
+  sF32 lrot_arr[3] = { lrot.x, lrot.y, lrot.z };   // was &lrot.x spanning 1 by-value params
 	sInt i,j;
 	GenMesh *out;
 	sMatrix xform,step,lxform,lstep,tmp;
@@ -4083,7 +4100,7 @@ GenMesh * __stdcall Mesh_Multiply(KOp *kop,GenMesh *mesh,sFSRT srt,sInt count,sI
   if(CheckMesh(mesh)) return 0;
 
 	step.InitSRT(srt.v);
-  lstep.InitEulerPI2(&lrot.x);
+  lstep.InitEulerPI2(lrot_arr);
 	out = new GenMesh;
   out->Init(mesh->VertMask(),0);
 	xform.Init();
@@ -4786,6 +4803,7 @@ GenMesh * __stdcall Mesh_SelectAngle(GenMesh *mesh,sU32 dmask,sInt dmode,sF322 d
 
 GenMesh * __stdcall Mesh_Bend2(GenMesh *mesh,sF323 center,sF323 rotate,sF32 len,sF32 angle)
 {
+  sF32 rotate_arr[3] = { rotate.x, rotate.y, rotate.z };   // was &rotate.x spanning 1 by-value params
   sMatrix mt,mb;
   sVector vt,*vp;
   sF32 vx,vy,t,sa,ca;
@@ -4793,7 +4811,7 @@ GenMesh * __stdcall Mesh_Bend2(GenMesh *mesh,sF323 center,sF323 rotate,sF32 len,
 
   if(CheckMesh(mesh)) return 0;
 
-  mt.InitEulerPI2(&rotate.x);
+  mt.InitEulerPI2(rotate_arr);
   mt.l.x = -center.x;
   mt.l.y = -center.y;
   mt.l.z = -center.z;
@@ -4920,6 +4938,36 @@ GenMesh * __stdcall Mesh_Color(GenMesh *mesh,sF323 pos,sF322 dir,sU32 color,sF32
       break;
     }
   }
+#if defined(__EMSCRIPTEN__)
+  // 2004: the render-slot pass consumed the light slots, so repeated Mesh
+  // Color operators (common in the beta data) didn't add the light again
+  extern sInt kkBetaData;
+  if(op == 2 && kkBetaData)
+    mesh->Lgts.Count = 0;
+#endif
+#if defined(__EMSCRIPTEN__)
+  extern sInt kkBitmapLog;
+  if(op == 2 && kkBitmapLog)
+  {
+    // debug: how much light the slots bake into the vertices
+    sVector sum,mx; sum.Init(0,0,0,0); mx.Init(0,0,0,0);
+    for(i=0;i<mesh->Vert.Count;i++)
+    {
+      vt = mesh->VertBuf + i * mesh->VertSize();
+      sum.Add3(vt[sc]);
+      mx.x = sMax(mx.x,vt[sc].x); mx.y = sMax(mx.y,vt[sc].y); mx.z = sMax(mx.z,vt[sc].z);
+    }
+    sF32 n = mesh->Vert.Count ? 1.0f/mesh->Vert.Count : 0;
+    fprintf(stderr,"[kk] meshcolor slots=%d verts=%d avg=%.3f,%.3f,%.3f max=%.3f,%.3f,%.3f sc=%d sn=%d\n",mesh->Lgts.Count,mesh->Vert.Count,
+            sum.x*n,sum.y*n,sum.z*n,mx.x,mx.y,mx.z,sc,sn);
+    for(j=0;j<mesh->Lgts.Count && j<3;j++)
+    {
+      vl = mesh->VertBuf + mesh->Lgts[j] * mesh->VertSize();
+      fprintf(stderr,"[kk]   slot %d pos=%.2f,%.2f,%.2f col=%.2f,%.2f,%.2f range=%.2f,%.2f,%.2f\n",j,vl[0].x,vl[0].y,vl[0].z,
+              vl[sc].x,vl[sc].y,vl[sc].z,vl[sn+1].x,vl[sn+1].y,vl[sn+1].z);
+    }
+  }
+#endif
 
   return mesh;
 }
@@ -4928,6 +4976,7 @@ GenMesh * __stdcall Mesh_Color(GenMesh *mesh,sF323 pos,sF322 dir,sU32 color,sF32
 
 GenMesh * __stdcall Mesh_BendS(GenMesh *mesh,sF323 anchor,sF323 rotate,sF32 len,KSpline *spline)
 {
+  sF32 rotate_arr[3] = { rotate.x, rotate.y, rotate.z };   // was &rotate.x spanning 1 by-value params
   sMatrix mt;
   static sMatrix mat[129];
   sVector vt,pt,dir,v0,v1,*vp;
@@ -4936,7 +4985,7 @@ GenMesh * __stdcall Mesh_BendS(GenMesh *mesh,sF323 anchor,sF323 rotate,sF32 len,
 
   if(!spline || CheckMesh(mesh)) return 0;
 
-  mt.InitEulerPI2(&rotate.x);
+  mt.InitEulerPI2(rotate_arr);
   mt.l.x = -anchor.x;
   mt.l.y = -anchor.y;
   mt.l.z = -anchor.z;
@@ -5014,6 +5063,7 @@ GenMesh * __stdcall Mesh_ShadowEnable(GenMesh *mesh,sBool enable)
 
 GenMesh * __stdcall Mesh_Multiply2(sInt seed,sInt3 count1,sF323 translate1,sInt3 count2,sF323 translate2,sInt random,sInt3 count3,sF323 translate3,sInt inCount,GenMesh *inMesh,...)
 {
+  sVARARGS_INIT(GenMesh *,inMesh,inCount);
   if(!inCount)
     return 0;
 
@@ -5056,7 +5106,7 @@ GenMesh * __stdcall Mesh_Multiply2(sInt seed,sInt3 count1,sF323 translate1,sInt3
                     lastStart = start;
                     start = mesh->Vert.Count;
 
-                    GenMesh *in = (&inMesh)[sMin<sInt>(sGetRnd(inCount+random),inCount-1)];
+                    GenMesh *in = sVARARGS(inMesh)[sMin<sInt>(sGetRnd(inCount+random),inCount-1)];
                     mesh->Add(in,!!start);
 
                     for(sInt i=lastStart;i<start;i++)
@@ -5083,7 +5133,7 @@ GenMesh * __stdcall Mesh_Multiply2(sInt seed,sInt3 count1,sF323 translate1,sInt3
   }
 
   for(sInt i=0;i<inCount;i++)
-    (&inMesh)[i]->Release();
+    sVARARGS(inMesh)[i]->Release();
 
   mesh->GotNormals = sFALSE;
   return mesh;

@@ -201,6 +201,18 @@ GenMaterial * __stdcall Init_Material_Material(KOp *op)
   base->ShaderLevel = sMin(GenOverlayManager->CurrentShader,sPS_11);
   sCopyMem(&base->BaseFlags,op->GetAnimPtrU(0),48*4);
   multi = (MultiPara *)(op->GetAnimPtrU(48));
+#if defined(__EMSCRIPTEN__)
+  {
+    // The 2004 blend table (beta exe VA 0x81f238/0x81f25c/0x81f280) had
+    // 6 = ONE/ONE add, 7 = DESTALPHA/ONE and 8 = SRCALPHA/ONE; later 6 became
+    // subtract and the two alpha adds moved up one. Unmapped, glows like the
+    // lit pattern on the corridor's end wall were subtracted instead.
+    extern sInt kkBetaData;
+    static const sU8 blend04[16] = { 0,1,2,3,4,5,2,8,9,9,10,11,12,13,14,15 };
+    if(kkBetaData)
+      base->BaseFlags = (base->BaseFlags & ~sMBF_BLENDMASK) | (blend04[(base->BaseFlags >> 12) & 15] << 12);
+  }
+#endif
 
 #if !sPLAYER
   multi->PSOps = 0;
@@ -491,7 +503,8 @@ GenMaterial * __stdcall Material_Add(sInt count,GenMaterial *m0,...)
   GenMaterial **mp,*mtrl,*madd;
   GenMaterialPass *pc;
 
-  mp = &m0;
+  sVARARGS_INIT(GenMaterial *,m0,count);
+  mp = sVARARGS(m0);
   mtrl = new GenMaterial;
 
   for(i=0;i<count;i++)

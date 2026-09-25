@@ -43,7 +43,7 @@ sU32 sGetRnd()
 {
   sU32 i;
 
-#if sMOBILE
+#if sMOBILE || defined(__EMSCRIPTEN__)
   sU32 eax,ebx;
   eax = sRandomSeed;
   eax = eax*0x343fd+0x269ec3;
@@ -347,7 +347,7 @@ sF32 sRangeF32(sF32 a,sF32 b,sF32 c)
 */
 
 #if !sMOBILE
-#if sINTRO
+#if sINTRO && !defined(__EMSCRIPTEN__)
 
 
 

@@ -3,6 +3,15 @@
 #include "_types.hpp"
 #include "_start.hpp"
 #include "_viruz2.hpp"
+#if defined(__EMSCRIPTEN__)
+extern sInt CV2MPlayerNextLength;   // see wasm/v2_shim.cpp
+#define sV2M_LEN(n) CV2MPlayerNextLength = (n);
+#include <stdio.h>
+#define KKSTAGE(str) do { fprintf(stderr,"[kk] stage: %s\n",str); fflush(stderr); } while(0)
+#else
+#define sV2M_LEN(n)
+#define KKSTAGE(str)
+#endif
 #include "_ogg.hpp"
 #include "kdoc.hpp"
 #include "kkriegergame.hpp"
@@ -70,6 +79,8 @@ static void RenderSoundEffects(KDoc *doc,sU8 *data)
   count = *data32++;
   ent = (VFXEntry *) data32;
 
+  sV2M_LEN(size);
+
   if(Sound->Open(v2m))
   {
     for(i=0;i<count;i++)
@@ -98,7 +109,12 @@ static void RenderSoundEffects(KDoc *doc,sU8 *data)
         smps[j*2+1] = sRange<sInt>(smpf[j*2+1]*amp*0x7fff,0x7fff,-0x7fff);
       }
 
+#if defined(__EMSCRIPTEN__)
+      extern sInt kkBetaData;                  // 2004 SampleAdd made plain stereo buffers (no DSBCAPS_CTRL3D)
+      sSystem->SampleAdd(smps,len,4,ent->MinorId,!kkBetaData && !(ent->MajorId & 1));
+#else
       sSystem->SampleAdd(smps,len,4,ent->MinorId,!(ent->MajorId & 1));
+#endif
       sSystem->Progress(doc->Ops.Count+i,doc->Ops.Count+count);
       ent++;
     }
@@ -134,6 +150,7 @@ void IntroSoundHandler(sS16 *stream,sInt left,void *user)
 #pragma lekktor(off)
     if(SoundTimer>=(2*60+25)*44100)
     {
+      sV2M_LEN(Document->SongSize);
       Sound->Open(Document->SongData);
       Sound->Play(0);
       SoundTimer = 0;
@@ -210,17 +227,23 @@ sBool sAppHandler(sInt code,sDInt value)
     Document = new KDoc;
 
     Document->Init(data);
+    KKSTAGE("KDoc::Init done");
     Environment = new KEnvironment;
     Sound = 0;
 
+    KKSTAGE("sInitPerlin");
     sInitPerlin();   
+    KKSTAGE("GenOverlayInit");
     GenOverlayInit();
 
     RenderTargetManager = new RenderTargetManager_;
+    KKSTAGE("new Engine_");
     Engine = new Engine_;
 
 #if sLINK_KKRIEGER
+    KKSTAGE("new KKriegerGame");
     Game = new KKriegerGame;
+    KKSTAGE("Game->Init");
     Game->Init();
 #else
     Game = 0;
@@ -231,9 +254,12 @@ sBool sAppHandler(sInt code,sDInt value)
     Environment->Splines = &Document->Splines.Array;
     Environment->SplineCount = Document->Splines.Count;
     Environment->Game = Game;
+    KKSTAGE("InitView/InitFrame");
     Environment->InitView();
     Environment->InitFrame(0,0);
+    KKSTAGE("Document->Precalc");
     Document->Precalc(Environment);
+    KKSTAGE("Precalc done");
     Environment->ExitFrame();
 
 #if WAITFORKEY
@@ -242,13 +268,15 @@ sBool sAppHandler(sInt code,sDInt value)
 
     if(Document->SongSize)
     {
-#if sINTRO
+#if sINTRO || sLINK_KKRIEGER                          // kkrieger songs are V2M, never ogg
       Sound = new CV2MPlayer;
 
 #if sLINK_KKRIEGER
       if(Document->SampleSize)
         RenderSoundEffects(Document,Document->SampleData);
 #endif
+
+      sV2M_LEN(Document->SongSize);
 
       Sound->Open(Document->SongData);
       Sound->Play(0);
@@ -323,6 +351,7 @@ sBool sAppHandler(sInt code,sDInt value)
       {
 #if sINTRO
         sSystem->SetSoundHandler(0,64);
+        sV2M_LEN(Document->SongSize);
         Sound->Open(Document->SongData);
         Sound->Play(0);
         sSystem->SetSoundHandler(IntroSoundHandler,64);
@@ -370,7 +399,19 @@ sBool sAppHandler(sInt code,sDInt value)
     /*vp.Window.y0 = r.YSize()/2 - r.XSize()/2/2;
     vp.Window.y1 = r.YSize()/2 + r.XSize()/2/2;*/
 #if sLINK_KKRIEGER
+#if defined(__EMSCRIPTEN__)
+    // the view is 2:1 (Environment->Aspect below); the original placed it at
+    // 1/6..5/6 of a 4:3 screen, which is the same thing there. For other
+    // screen shapes centre the largest 2:1 rectangle instead of stretching.
+    {
+      sInt bh = sMin(sSystem->ConfigX/2,sSystem->ConfigY);
+      sInt bw = 2*bh;
+      sInt x0 = (sSystem->ConfigX-bw)/2, y0 = (sSystem->ConfigY-bh)/2;
+      vp.Window.Init(x0,y0,x0+bw,y0+bh);
+    }
+#else
     vp.Window.Init(0,sSystem->ConfigY*1/6,sSystem->ConfigX,sSystem->ConfigY*5/6);
+#endif
 #endif
     GenOverlayManager->SetMasterViewport(vp);
     RenderTargetManager->SetMasterViewport(vp);
@@ -379,6 +420,12 @@ sBool sAppHandler(sInt code,sDInt value)
     sInt mode;
     mode = Game->GetNewRoot();
 
+#if defined(__EMSCRIPTEN__)
+    // single-root data (the converted 2004 beta): intro, menu and game are one
+    // operator graph switched by its own ops, so keep timeline and music going
+    if(mode!=Document->CurrentRoot && Document->RootOps[mode]==Document->RootOps[Document->CurrentRoot])
+      Document->CurrentRoot = mode;
+#endif
     if(mode!=Document->CurrentRoot)
     {
       sSystem->SetSoundHandler(0,0);
@@ -388,6 +435,8 @@ sBool sAppHandler(sInt code,sDInt value)
       Document->Precalc(Environment);
       Environment->ExitFrame();
       Game->ResetRoot(Environment,Document->RootOps[Document->CurrentRoot],0);
+
+      sV2M_LEN(Document->SongSize);
 
       Sound->Open(Document->SongData);
       Sound->Play(0);
@@ -421,6 +470,14 @@ sBool sAppHandler(sInt code,sDInt value)
     Environment->Aspect = 2.0f;
 
     root = Document->RootOps[Document->CurrentRoot];
+#if defined(__EMSCRIPTEN__)
+    { static sInt kkLastRoot = -1;                       // log root switches, not every frame
+      if(Document->CurrentRoot != kkLastRoot)
+      {
+        kkLastRoot = Document->CurrentRoot;
+        fprintf(stderr,"[kk] paint: CurrentRoot=%d mode=%d root=%p cache=%p classid=%d\n",Document->CurrentRoot,mode,root,root?root->Cache:0,(root&&root->Cache)?root->Cache->ClassId:-1);
+      } }
+#endif
 
     if(beat>=0 && root->Cache->ClassId==KC_DEMO)
     {

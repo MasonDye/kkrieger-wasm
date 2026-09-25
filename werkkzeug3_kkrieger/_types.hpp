@@ -82,7 +82,7 @@
 /****************************************************************************/
 
 //#if _DEBUG                          // fix memory management
-#if !sINTRO && sPLATFORM!=sPLAT_PDA
+#if !sINTRO && sPLATFORM!=sPLAT_PDA && !defined(__EMSCRIPTEN__)   // the file/line tracking new is MSVC only
 #define _MFC_OVERRIDES_NEW
 void *  __cdecl operator new(unsigned int);
 void *  __cdecl operator new(unsigned int,const char *,int);
@@ -314,15 +314,19 @@ __forceinline sF32 sFade(sF32 a,sF32 b,sF32 fade)												{return a+(b-a)*fad
 
 // integer
 
+#if !defined(__EMSCRIPTEN__)
 typedef unsigned int size_t;
+#endif
 
 extern "C"
 {
+#if !defined(__EMSCRIPTEN__)
   int __cdecl abs(int);
   void * __cdecl memset( void *dest, int c, size_t count );
   void * __cdecl memcpy( void *dest, const void *src, size_t count );
   int __cdecl memcmp( const void *buf1, const void *buf2, size_t count );
   size_t __cdecl strlen( const char *string );
+#endif
 }
 
 #pragma intrinsic (abs)                                       // int intrinsic
@@ -386,14 +390,14 @@ __forceinline sF64 sFTanH(sF64 f)         { return tanh(f); }
 
 __forceinline sF64 sFInvSqrt(sF64 f)      { return 1.0/sqrt(f); }
 
-#if !sINTRO 
+#if !sINTRO || defined(__EMSCRIPTEN__)
 __forceinline sF64 sFACos(sF64 f)         { return acos(f); }
 __forceinline sF64 sFMod(sF64 a,sF64 b)   { return fmod(a,b); }
 __forceinline sF64 sFExp(sF64 f)          { return exp(f); }
 __forceinline sF64 sFPow(sF64 a,sF64 b)   { return pow(a,b); }
 #endif
 
-#if sINTRO
+#if sINTRO && !defined(__EMSCRIPTEN__)
 sF64 sFACos(sF64 f);
 sF64 sFPow(sF64 a,sF64 b);
 sF64 sFMod(sF64 a,sF64 b);
@@ -416,7 +420,62 @@ sInt sQuadraticRoots(const sF32 *coeffs,sF32 *roots);
 
 #if !sMOBILE
 
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__) || defined(__wasm__)
+
+// ---------------------------------------------------------------------------
+// WebAssembly port: no x87, no MMX. wasm floats are strict IEEE-754 single /
+// double, so the FPU control-word pokes below are no-ops. The integer helpers
+// use the same 64bit formulations as the sMOBILE branch further down.
+// ---------------------------------------------------------------------------
+
+__forceinline void sFloatFix()    {}
+__forceinline void sFloatDouble() {}
+__forceinline void sFloatDen1()   {}
+__forceinline void sFloatDen0()   {}
+
+__forceinline sInt sFtol(const float f)
+{
+  // x87 fistp with the default control word rounds to nearest-even.
+  return (sInt) __builtin_nearbyintf(f);
+}
+
+__forceinline sF32 sFRound(const float f)
+{
+  return __builtin_nearbyintf(f);
+}
+
+__forceinline void sFSinCos(const float x,sF32 &sine,sF32 &cosine)
+{
+  sine   = __builtin_sinf(x);
+  cosine = __builtin_cosf(x);
+}
+
+__forceinline sInt sMulDiv(sInt var_a,sInt var_b,sInt var_c)
+{
+  return (sS32)( ((sS64)var_a)*((sS64)var_b)/var_c );
+}
+
+__forceinline sInt sMulShift(sInt var_a,sInt var_b)
+{
+  return (sS32)( (((sS64)var_a)*((sS64)var_b))>>16 );
+}
+
+__forceinline sInt sMulShift30(sInt var_a,sInt var_b)
+{
+  return (sS32)( (((sS64)var_a)*((sS64)var_b))>>30 );
+}
+
+__forceinline sInt sDivShift(sInt var_a,sInt var_b)
+{
+  return (sS32)( (((sS64)var_a)<<16)/((sS64)var_b) );
+}
+
+__forceinline sInt sDivShift30(sInt var_a,sInt var_b)
+{
+  return (sS32)( (((sS64)var_a)<<30)/((sS64)var_b) );
+}
+
+#elif defined(__GNUC__)
 __forceinline void sFloatFix()
 {
     int ffix = 0x103f; // round to nearest even + single precision
@@ -2103,7 +2162,9 @@ class sTickTimer
   sU64 Total;
   sU64 LastStart;
 
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+  static sU64 Tick()                  { return 0; }   // no cycle counter in wasm
+#elif defined(__GNUC__)
   static sU64 Tick()                  { sU64 tick;
 
                                         asm volatile ( "rdtsc\n\t"    // Returns the time in EDX:EAX.

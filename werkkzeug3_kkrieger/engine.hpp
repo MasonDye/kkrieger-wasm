@@ -312,6 +312,20 @@ private:
   void SortPaintJobs();
   void RenderPaintJobs(KEnvironment *kenv);
 
+#if defined(__EMSCRIPTEN__)
+  // the Breakpoint 2004 renderer for the beta data (wasm/render2004.cpp)
+  struct Shadow04Job;
+
+  EngLight Lights04[64];                    // every light added this frame, unculled
+  sInt Lights04Count;
+  sBool Build04;                            // BuildPaintJobs: 2004 job layout
+  Shadow04Job *Shadow04Jobs;
+  sInt Shadow04Count;
+
+  void Paint2004(KEnvironment *kenv,sBool specular);
+  void RenderPaintJobs2004(KEnvironment *kenv,EngLight **lights,sInt count,sInt shadows,sBool specular);
+#endif
+
 #if !sINTRO
   sInt GeoLine;
   sInt GeoTri;

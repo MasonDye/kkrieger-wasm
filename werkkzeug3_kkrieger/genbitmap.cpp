@@ -1,12 +1,22 @@
 // This file is distributed under a BSD license. See LICENSE.txt for details.
 
 #include "genbitmap.hpp"
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+#define KKLOG(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); } while(0)
+#endif
+
 #include "rtmanager.hpp"
 #include "_start.hpp"
+#if defined(__EMSCRIPTEN__)
+#include "wasm/mmx_scalar.hpp"
+#else
 #include "mmintrin.h"
 #include "xmmintrin.h"
+#endif
 #ifdef __MINGW32__
 #include <cstddef>
+
 #endif
 
 #define SCRIPTVERIFY(x) {if(!(x)) return 0;}
@@ -158,7 +168,27 @@ void Fade64(sU64 &r,sU64 &c0,sU64 &c1,sInt fade)
   static const sU64 xor0 = 0xffffffff00000000;
   static const sU64 add0 = 0x0000800100000000;
 
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+
+  // MMX original: mm0 = fade>>1 broadcast, mm1 = 0x8000-(fade>>1) broadcast,
+  // both packssdw-saturated to 16 bit; then r = ((c0*mm1)>>16 + (c1*mm0)>>16)<<1
+  // with wrapping paddw/psllw.
+  {
+    const sS32 h = ((sS32)fade) >> 1;
+    const sS16 f = mmxSatS16(h);              // packssdw(fade>>1)
+    const sS16 g = mmxSatS16(0x8000 - h);     // packssdw(~(fade>>1) + 0x8001)
+    __m64 mc0, mc1, mr;
+    mc0.q = c0; mc1.q = c1;
+    for(sInt i=0;i<4;i++)
+    {
+      sS16 a = (sS16)(((sS32)mc0.s16[i] * (sS32)g) >> 16);
+      sS16 b = (sS16)(((sS32)mc1.s16[i] * (sS32)f) >> 16);
+      mr.u16[i] = (sU16)(((sU16)(a + b)) << 1);
+    }
+    r = mr.q;
+  }
+
+#elif defined(__GNUC__)
 #if defined(__i386__)
   asm (
     "mov       %1, %%eax\n\t"
@@ -224,7 +254,23 @@ void Fade64(sU64 &r,sU64 &c0,sU64 &c1,sInt fade)
 
 void AddScale64(sU64 &r,sU64 &c0,sU64 &c1,sInt fade)
 {
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+
+  // r = paddsw(c0, psllw(pmulhw(c1, sat16(fade>>1)), 1))
+  {
+    const sS16 f = mmxSatS16(((sS32)fade) >> 1);
+    __m64 mc0, mc1, mr;
+    mc0.q = c0; mc1.q = c1;
+    for(sInt i=0;i<4;i++)
+    {
+      sS16 t = (sS16)(((sS32)mc1.s16[i] * (sS32)f) >> 16);
+      t = (sS16)(((sU16)t) << 1);                       // psllw (wraps)
+      mr.s16[i] = mmxSatS16((sS32)mc0.s16[i] + t);      // paddsw
+    }
+    r = mr.q;
+  }
+
+#elif defined(__GNUC__)
 #if defined(__i386__)
   asm (
     "mov       %1, %%eax\n\t"
@@ -289,7 +335,66 @@ void BilinearFilter(BilinearContext *ctx,sU64 *r,sInt u,sInt v)
 {
   static const sU64 adjust = 0x8000800080008000;
 
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+
+  // Bilinear tap addressing, transcribed from the MMX version. u and v are
+  // 16.16 fixed point; XSize1/XAm are pre-shifted byte offsets (8 bytes per
+  // texel), YSize1/YAm are texel counts. The odd-looking clamp terms are the
+  // original "sar 31" sign-mask trick: out-of-range coordinates snap to the
+  // high edge when positive and to 0 when negative.
+  {
+    const sU8 *base = (const sU8 *) ctx->Src;
+
+    // --- rows ---
+    sInt yi   = ((sS32)v) >> 16;
+    sInt yc0  = (((sS32)((sU32)v + 0x80000000u)) >> 31) & ctx->YSize1;
+    sInt y0   = yi & ctx->YAm;
+    if((sU32)y0 > (sU32)ctx->YSize1) y0 = yc0;
+
+    sInt yc1  = (((sS32)((sU32)yi + 0x7fffffffu)) >> 31) & ctx->YSize1;
+    sInt y1   = (yi + 1) & ctx->YAm;
+    if((sU32)y1 > (sU32)ctx->YSize1) y1 = yc1;
+
+    const sU8 *row0 = base + (((sU32)y0) << ctx->XShift);
+    const sU8 *row1 = base + (((sU32)y1) << ctx->XShift);
+
+    // --- columns (already byte offsets: u>>13 == (u>>16)*8) ---
+    sInt xb   = ((sS32)u) >> 13;
+    sInt xc0  = (((sS32)((sU32)u + 0x80000000u)) >> 31) & ctx->XSize1;
+    sInt x0   = xb & ctx->XAm;
+    if((sU32)x0 > (sU32)ctx->XSize1) x0 = xc0;
+
+    sInt xc1  = (((sS32)((sU32)xb + 0x7ffffff8u)) >> 31) & ctx->XSize1;
+    sInt x1   = (xb + 8) & ctx->XAm;
+    if((sU32)x1 > (sU32)ctx->XSize1) x1 = xc1;
+
+    __m64 p00, p01, p10, p11, out;
+    p00.q = *(const sU64 *)(row0 + x0);
+    p01.q = *(const sU64 *)(row0 + x1);
+    p10.q = *(const sU64 *)(row1 + x0);
+    p11.q = *(const sU64 *)(row1 + x1);
+
+    const sS16 fu = (sS16)((sU16)(u & 0xffff) >> 1);   // psrlw 1
+    const sS16 fv = (sS16)((sU16)(v & 0xffff) >> 1);
+
+    for(sInt i=0;i<4;i++)
+    {
+      // horizontal lerp on both rows (paddw/psllw wrap, pmulhw is signed)
+      sS16 d0 = (sS16)((sU16)p01.s16[i] - (sU16)p00.s16[i]);
+      sS16 d1 = (sS16)((sU16)p11.s16[i] - (sU16)p10.s16[i]);
+      sS16 h0 = (sS16)((sU16)p00.s16[i] + (sU16)(((sS16)(((sS32)d0*fu)>>16)) << 1));
+      sS16 h1 = (sS16)((sU16)p10.s16[i] + (sU16)(((sS16)(((sS32)d1*fu)>>16)) << 1));
+
+      // vertical lerp, biased by 0x8000 so the trailing psubusw clamps to 0
+      sS16 dv = (sS16)((sU16)h1 - (sU16)h0);
+      sU16 acc = (sU16)((sU16)h0 + 0x8000u);
+      acc = (sU16)(acc + (sU16)(((sS16)(((sS32)dv*fv)>>16)) << 1));
+      out.u16[i] = (sU16)(acc > 0x8000u ? acc - 0x8000u : 0);   // psubusw
+    }
+    *r = out.q;
+  }
+
+#elif defined(__GNUC__)
 #define DECLARE_STRUCT_OFFSET(Type, Member)     \
       [Member] "i" (offsetof(Type, Member))
 #if defined(__i386__)
@@ -574,7 +679,251 @@ void __stdcall Bitmap_Inner(sU64 *d,sU64 *s,sInt count,sInt mode,sU64 *x=0)
 {
   static const sU64 mask1 = 0x8000800080008000;
 
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+
+  // 1:1 transcription of the MMX blend loop. Register names are kept so the
+  // two versions can be diffed against each other; mm2 holds s[0] ("the
+  // colour"), the remaining mmN are the constants set up before the loop.
+  {
+    __m64 mm0,mm1,mm2,mm3,mm4,mm5,mm6,mm7;
+
+    mm3.q = 0x7fff7fff7fff7fffull;      // pcmpeqb / psrlw 1
+    mm4.q = 0x0000ffffffffffffull;      // pcmpeqb / psrlq 16
+    mm5.q = ~mm4.q;                     // pxor    -> 0xffff000000000000
+    mm4 = _mm_srli_pi16(mm4,1);         //         -> 0x00007fff7fff7fff
+    mm5 = _mm_srli_pi16(mm5,1);         //         -> 0x7fff000000000000
+    mm2.q = s[0];                       // data[0]
+    mm7.q = 0x3fff3fff3fff3fffull;      // pcmpeqb / psrlw 2
+    mm6.q = 0;
+
+    if(mode == 19)                      // "colour range" needs data[1] too
+    {
+      mm7.q = s[1];
+      mm7 = _mm_subs_pi16(mm7,mm2);     // psubsw mm2,mm7
+      mm1.q = 0;
+    }
+
+    for(sInt i=0;i<count;i++)
+    {
+      switch(mode)
+      {
+      case 0:   // add
+        mm0.q = x[i];
+        mm0 = _mm_adds_pi16(mm0,*(const __m64 *)&s[i]);
+        break;
+
+      case 1:   // sub
+        mm0.q = x[i];
+        mm0 = _mm_subs_pu16(mm0,*(const __m64 *)&s[i]);
+        break;
+
+      case 2:   // mul
+        mm0.q = x[i];
+        mm0 = _mm_mulhi_pi16(mm0,*(const __m64 *)&s[i]);
+        mm0 = _mm_slli_pi16(mm0,1);
+        break;
+
+      case 3:   // diff
+        mm0.q = x[i];
+        mm0 = _mm_sub_pi16(mm0,*(const __m64 *)&s[i]);
+        mm0 = _mm_add_pi16(mm0,mm3);
+        mm0 = _mm_srli_pi16(mm0,1);
+        break;
+
+      case 4:   // alpha
+        mm0.q = s[i];
+        mm1.q = x[i];
+        {
+          __m64 t6 = _mm_srli_si64(mm0,16);
+          __m64 t7 = _mm_srli_si64(mm0,32);
+          mm0 = _mm_add_pi16(mm0,t6);
+          t7  = _mm_add_pi16(t7,t6);
+          mm0 = _mm_srli_pi16(mm0,1);
+          t7  = _mm_srli_pi16(t7,1);
+          mm0 = _mm_add_pi16(mm0,t7);
+          mm1 = _mm_and_si64(mm1,mm4);
+          mm0 = _mm_slli_si64(mm0,47);
+          mm0 = _mm_and_si64(mm0,mm5);
+          mm0 = _mm_or_si64(mm0,mm1);
+        }
+        break;
+
+      case 5:   // mul color
+        mm0.q = x[i];
+        mm0 = _mm_mulhi_pi16(mm0,mm2);
+        mm0 = _mm_slli_pi16(mm0,1);
+        break;
+
+      case 6:   // add color
+        mm0.q = x[i];
+        mm0 = _mm_adds_pi16(mm0,mm2);
+        break;
+
+      case 7:   // sub color
+        mm0.q = x[i];
+        mm0 = _mm_subs_pu16(mm0,mm2);
+        break;
+
+      case 8:   // gray color
+        mm0.q = x[i];
+        {
+          __m64 t6 = _mm_srli_si64(mm0,16);
+          __m64 t7 = _mm_srli_si64(mm0,32);
+          mm0 = _mm_add_pi16(mm0,t6);
+          t6  = _mm_add_pi16(t6,t7);        // dead in the original too
+          mm0 = _mm_srli_pi16(mm0,1);
+          t7  = _mm_srli_pi16(t7,1);
+          mm0 = _mm_add_pi16(mm0,t7);
+          mm0 = _mm_srli_pi16(mm0,1);
+          mm0 = _mm_unpacklo_pi16(mm0,mm0);
+          mm0 = _mm_unpacklo_pi16(mm0,mm0);
+          mm0 = _mm_or_si64(mm0,mm5);
+        }
+        break;
+
+      case 9:   // invert color
+        mm0.q = x[i];
+        mm0 = _mm_xor_si64(mm0,mm3);
+        break;
+
+      case 10:  // scale color
+        mm0.q = x[i];
+        {
+          __m64 lo = _mm_mullo_pi16(mm0,mm2);
+          __m64 hi = _mm_mulhi_pi16(mm0,mm2);
+          __m64 a  = _mm_unpacklo_pi16(lo,hi);
+          __m64 b  = _mm_unpackhi_pi16(lo,hi);
+          a = _mm_srli_pi32(a,11);
+          b = _mm_srli_pi32(b,11);
+          mm0 = _mm_packs_pi32(a,b);
+        }
+        break;
+
+      case 11:  // merge
+        mm0.q = d[i];
+        {
+          __m64 ms; ms.q = s[i];
+          __m64 mx; mx.q = x[i];
+          mm1 = _mm_subs_pi16(mm3,mm0);
+          mm0 = _mm_mulhi_pi16(mm0,ms);
+          mm1 = _mm_mulhi_pi16(mm1,mx);
+          mm0 = _mm_adds_pi16(mm0,mm1);
+          mm0 = _mm_slli_pi16(mm0,1);
+        }
+        break;
+
+      case 12:  // brightness
+        mm0.q = s[i];
+        mm1.q = x[i];
+        {
+          __m64 mask = _mm_cmpgt_pi16(mm0,mm7);
+          mask = _mm_srli_pi16(mask,1);
+          mm0 = _mm_xor_si64(mm0,mask);
+          mm1 = _mm_xor_si64(mm1,mask);
+          mm0 = _mm_mulhi_pi16(mm0,mm1);
+          mm0 = _mm_slli_pi16(mm0,2);
+          mm0 = _mm_xor_si64(mm0,mask);
+        }
+        break;
+
+      case 13:  // subr
+        mm0.q = s[i];
+        mm0 = _mm_subs_pu16(mm0,*(const __m64 *)&x[i]);
+        break;
+
+      case 14:  // mulmerge
+        mm0.q = d[i];
+        {
+          __m64 ms; ms.q = s[i];
+          __m64 mx; mx.q = x[i];
+          mm1 = mm3;
+          ms  = _mm_mulhi_pi16(ms,mx);
+          ms  = _mm_slli_pi16(ms,1);
+          mm1 = _mm_subs_pi16(mm1,mm0);
+          mm0 = _mm_mulhi_pi16(mm0,ms);
+          mm1 = _mm_mulhi_pi16(mm1,mx);
+          mm0 = _mm_adds_pi16(mm0,mm1);
+          mm0 = _mm_slli_pi16(mm0,1);
+        }
+        break;
+
+      case 15:  // sharpen
+        mm0.q = x[i];
+        {
+          __m64 orig = mm0;
+          mm0 = _mm_subs_pu16(mm0,*(const __m64 *)&d[i]);
+          __m64 lo = _mm_mullo_pi16(mm0,mm2);
+          __m64 hi = _mm_mulhi_pi16(mm0,mm2);
+          __m64 a  = _mm_unpacklo_pi16(lo,hi);
+          __m64 b  = _mm_unpackhi_pi16(lo,hi);
+          a = _mm_srai_pi32(a,11);
+          b = _mm_srai_pi32(b,11);
+          mm0 = _mm_packs_pi32(a,b);
+          mm0 = _mm_adds_pi16(mm0,orig);
+          mm0 = _mm_max_pi16(mm0,mm6);
+        }
+        break;
+
+      case 16:  // hardlight
+        mm1.q = s[i];
+        mm0.q = x[i];
+        {
+          mm1 = _mm_slli_pi16(mm1,1);
+          __m64 mask = _mm_srai_pi16(mm1,15);
+          mm1 = _mm_and_si64(mm1,mm3);
+          __m64 orig = mm0;
+          mm0 = _mm_mulhi_pi16(mm0,mm1);
+          mm0 = _mm_slli_pi16(mm0,1);
+          mm1 = _mm_add_pi16(mm1,orig);
+          mm0 = _mm_xor_si64(mm0,mask);
+          mm1 = _mm_and_si64(mm1,mask);
+          mm0 = _mm_add_pi16(mm0,mm1);
+        }
+        break;
+
+      case 17:  // over
+        mm0.q = x[i];
+        mm1.q = s[i];
+        {
+          __m64 alpha = mm1;
+          mm1 = _mm_subs_pi16(mm1,mm0);
+          alpha = _mm_unpackhi_pi16(alpha,alpha);
+          alpha = _mm_unpackhi_pi16(alpha,alpha);
+          mm1 = _mm_mulhi_pi16(mm1,alpha);
+          mm1 = _mm_slli_pi16(mm1,1);
+          mm0 = _mm_adds_pi16(mm0,mm1);
+          mm0 = _mm_max_pi16(mm0,mm6);
+        }
+        break;
+
+      case 18:  // addsmooth (screen)
+        mm0.q = x[i];
+        mm1.q = s[i];
+        mm0 = _mm_xor_si64(mm0,mm3);
+        mm1 = _mm_xor_si64(mm1,mm3);
+        mm0 = _mm_mulhi_pi16(mm0,mm1);
+        mm0 = _mm_slli_pi16(mm0,1);
+        mm0 = _mm_xor_si64(mm0,mm3);
+        break;
+
+      case 19:  // color range
+        mm0.q = x[i];
+        mm0 = _mm_mulhi_pi16(mm0,mm7);
+        mm0 = _mm_slli_pi16(mm0,1);
+        mm0 = _mm_adds_pi16(mm0,mm2);
+        mm0 = _mm_max_pi16(mm0,mm1);
+        break;
+
+      default:
+        mm0.q = x[i];
+        break;
+      }
+
+      d[i] = mm0.q;
+    }
+  }
+
+#elif defined(__GNUC__)
 #if defined(__i386__)
   asm (
     "emms\n\t"
@@ -1254,13 +1603,14 @@ GenBitmap * __stdcall Bitmap_Merge(sInt mode,sInt count,GenBitmap *b0,...)
   sInt i;
   GenBitmap *bi,*in;
   SCRIPTVERIFY(b0);
+  sVARARGS_INIT(GenBitmap *,b0,count);
   SCRIPTVERIFY(b0->ClassId==KC_BITMAP);
   SCRIPTVERIFY(mode>=0 && mode<9);
   if(mode==5) mode=BI_BRIGHTNESS;  // ***SIZE
   if(mode>=6 && mode <=8) mode += BI_HARDLIGHT-6;
-  for(i=1;i<count && (&b0)[i];i++)
+  for(i=1;i<count && sVARARGS(b0)[i];i++)
   {
-    bi = ((&b0)[i]);
+    bi = (sVARARGS(b0)[i]);
     SCRIPTVERIFY(bi->ClassId==KC_BITMAP);
     if(b0->XSize!=bi->XSize || b0->YSize!=bi->YSize)
       return 0;
@@ -1272,9 +1622,9 @@ GenBitmap * __stdcall Bitmap_Merge(sInt mode,sInt count,GenBitmap *b0,...)
   if(CheckBitmap(b0,&in)) return 0;
 
   i = 1;
-  while(i<count && (&b0)[i])
+  while(i<count && sVARARGS(b0)[i])
   {
-    bi = ((&b0)[i]);
+    bi = (sVARARGS(b0)[i]);
     sVERIFY(b0->XSize==bi->XSize && b0->YSize==bi->YSize);
     Bitmap_Inner(b0->Data,bi->Data,b0->Size,mode,in->Data);
     bi->Release();
@@ -1855,7 +2205,9 @@ GenBitmap * __stdcall Bitmap_Blur(GenBitmap *bm,sInt flags,sF32 sx,sF32 sy,sF32 
   }
   while(repeat--);
   
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+  _mm_empty();
+#elif defined(__GNUC__)
   asm ("emms");
 #else
   __asm { emms };
@@ -1981,7 +2333,7 @@ GenBitmap * __stdcall Bitmap_Rotate(GenBitmap *bm,sF32 angle,sF32 sx,sF32 sy,sF3
   return bm;
 }
 
-static sInt CSTable[2][1025];
+static sInt CSTable[2][1026];   // CSLookup() reads table[ind+1] with ind up to 1024
 
 static sInt CSLookup(const sInt *table,sInt value)
 {
@@ -2026,6 +2378,8 @@ GenBitmap * __stdcall Bitmap_Twirl(GenBitmap *bm,sF32 strength,sF32 gamma,sF32 r
     CSTable[0][x] = 65536.0f * dsin;
     CSTable[1][x] = 65536.0f * dcos;
   }
+  CSTable[0][1025] = CSTable[0][1024];  // clamp the interpolation at the end
+  CSTable[1][1025] = CSTable[1][1024];
 
   sInt fcx = cx * 65536.0f;
   sInt fcy = cy * 65536.0f;
@@ -2747,6 +3101,12 @@ GenBitmap * __stdcall Bitmap_Text(KOp *op,KEnvironment *kenv,GenBitmap *bm,sF32 
       kenv->Letters[page][i].PreSpace = (w0-is)*1.0f/xs;
       kenv->Letters[page][i].Width = (w0+w1+w2+is*2)*1.0f/xs;
     }
+#if defined(__EMSCRIPTEN__)
+    KKLOG("[kk] fontpage %d: xs=%d ys=%d yf=%d font=%dx%d alias=%d is=%d es=%d 'A' xp=%d yp=%d w=%d,%d,%d uv=%.3f,%.3f-%.3f,%.3f\n",
+          page,xs,ys,yf,(sInt)(xs*height),(sInt)(ys*width),alias,is,es,let['A'].xp,let['A'].yp,let['A'].w0,let['A'].w1,let['A'].w2,
+          kenv->Letters[page]['A'].UV.x0,kenv->Letters[page]['A'].UV.y0,
+          kenv->Letters[page]['A'].UV.x1,kenv->Letters[page]['A'].UV.y1);
+#endif
     sDPrintF("-----------------------------------------\n");
   }
 #endif
@@ -3126,6 +3486,9 @@ static sInt CBLookup(const sInt *table,sInt value)
 
 GenBitmap * __stdcall Bitmap_ColorBalance(GenBitmap *bm,sF323 shadows,sF323 midtones,sF323 highlights)
 {
+  sF32 shadows_arr[9] = { shadows.x, shadows.y, shadows.z, midtones.x, midtones.y, midtones.z, highlights.x, highlights.y, highlights.z };   // was &shadows.x spanning 3 by-value params
+  sF32 midtones_arr[6] = { midtones.x, midtones.y, midtones.z, highlights.x, highlights.y, highlights.z };   // was &midtones.x spanning 2 by-value params
+  sF32 highlights_arr[3] = { highlights.x, highlights.y, highlights.z };   // was &highlights.x spanning 1 by-value params
   sInt i,j;
   sF32 x;
   sF32 vsha,vmid,vhil;
@@ -3141,9 +3504,9 @@ GenBitmap * __stdcall Bitmap_ColorBalance(GenBitmap *bm,sF323 shadows,sF323 midt
   // lookup tables
   for(j=0;j<3;j++)
   {
-    vsha = (&shadows.x)[j];
-    vmid = (&midtones.x)[j];
-    vhil = (&highlights.x)[j];
+    vsha = (shadows_arr)[j];
+    vmid = (midtones_arr)[j];
+    vhil = (highlights_arr)[j];
 
     p = sFPow(0.5f,vsha * 0.5f + vmid + vhil * 0.5f);
     min = -sMin(vsha,0.0f) * sc;
@@ -3689,6 +4052,11 @@ void GenBitmap::MakeTexture(sInt format)
   if(format!=0)
     Format = format;
   Texture = sSystem->AddTexture(XSize,YSize,Format,(sU16 *)Data,TexMipCount,TexMipTresh);
+#if defined(__EMSCRIPTEN__)
+  extern sInt kkBitmapLog;
+  if(kkBitmapLog)
+    fprintf(stderr,"[kk] bm texture %d from %p %dx%d fmt=%d\n",Texture,this,XSize,YSize,Format);
+#endif
 }
 
 /****************************************************************************/

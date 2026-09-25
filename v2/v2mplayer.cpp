@@ -26,6 +26,7 @@ namespace
   //////////////////////////////////////////////////////////////////////////////////////////////////////
 	{
 		// performs 64bit (nexttime-time)*usecs/td2 and a 32.32bit addition to smpldelta:smplrem
+#if defined(_MSC_VER) && defined(_M_IX86)
 		__asm {
 			mov eax, [nexttime]
 			sub eax, [time]
@@ -39,6 +40,15 @@ namespace
 			mov ecx, [smpldelta]
 			mov [ecx], eax
 		}
+#else
+		unsigned long long p = (unsigned long long)(sU32)(nexttime - time) * (unsigned long long)usecs;
+		sU32 q = (sU32)(p / td2);
+		sU32 r = (sU32)(p % td2);
+		sU32 old = *smplrem;
+		*smplrem = old + r;
+		if(*smplrem < old) q++;          // adc eax,0
+		*smpldelta = q;
+#endif
 	}
 }
 
@@ -311,6 +321,7 @@ void V2MPlayer::Play(sU32 a_time)
 
 	m_base.valid=sFALSE;
 	sU32 destsmpl, cursmpl=0;
+#if defined(_MSC_VER) && defined(_M_IX86)
 	__asm
 	{
 		mov  ecx, this
@@ -321,6 +332,9 @@ void V2MPlayer::Play(sU32 a_time)
 		idiv ebx
 		mov  [destsmpl], eax
 	}
+#else
+	destsmpl = (sU32)(((long long)(sS32)a_time * (long long)(sS32)m_samplerate) / (long long)(sS32)m_tpc);
+#endif
 
 	m_state.state=PlayerState::PLAYING;
 	m_state.smpldelta=0;
@@ -353,6 +367,7 @@ void V2MPlayer::Stop(sU32 a_fadetime)
 	if (a_fadetime)
 	{
 		sU32 ftsmpls;
+#if defined(_MSC_VER) && defined(_M_IX86)
 		__asm
 		{
 			mov  ecx, this
@@ -363,6 +378,9 @@ void V2MPlayer::Stop(sU32 a_fadetime)
 			idiv ebx
 			mov  [ftsmpls], eax
 		}
+#else
+		ftsmpls = (sU32)(((long long)(sS32)a_fadetime * (long long)(sS32)m_samplerate) / (long long)(sS32)m_tpc);
+#endif
 		m_fadedelta=m_fadeval/ftsmpls;
 	}
 	else
@@ -406,6 +424,7 @@ void V2MPlayer::Render(sF32 *a_buffer, sU32 a_len, sBool a_add)
 	{
     if (!a_add)
     {
+#if defined(_MSC_VER) && defined(_M_IX86)
 		  __asm {
 			  mov edi, [a_buffer]
 			  mov ecx, [a_len]
@@ -413,6 +432,9 @@ void V2MPlayer::Render(sF32 *a_buffer, sU32 a_len, sBool a_add)
 			  xor eax, eax
 			  rep stosd
 		  }
+#else
+		  memset(a_buffer,0,(size_t)a_len*2*sizeof(sF32));
+#endif
     }
 	}
 	else

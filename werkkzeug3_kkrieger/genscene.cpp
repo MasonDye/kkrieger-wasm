@@ -11,6 +11,12 @@
 #include "kkriegergame.hpp"
 #include "engine.hpp"
 
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+#define KKLOG(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); } while(0)
+extern sInt kkExecTrace;                                  // kdoc.cpp: one-frame op trace
+#endif
+
 #if !sPLAYER
 #include "winview.hpp"
 #endif
@@ -219,6 +225,29 @@ GenScene *MakeScene(KObject *in)
 /***                                                                      ***/
 /****************************************************************************/
 
+#if defined(__EMSCRIPTEN__)
+// 2004: a mesh paint job carried a copy of the animation variables and the
+// mesh's materials were animated with them (colour fades of the intro texts
+// are material animations driven by their event's time). The later engine
+// keeps only the time for bone animation, so for the beta data the animated
+// materials inside a queued mesh are executed here, with the variables of
+// the event that queues it. Only branches that contain animation are walked.
+static void kkExecMeshMaterialsR(KOp *op,KEnvironment *kenv)
+{
+  if(!op || op->SkipExec || !op->Cache)
+    return;
+  if(op->Cache->ClassId == KC_MATERIAL)
+  {
+    op->Exec(kenv);
+    return;
+  }
+  for(sInt i=0;i<op->GetInputCount();i++)
+    kkExecMeshMaterialsR(op->GetInput(i),kenv);
+  for(sInt i=0;i<op->GetLinkMax();i++)
+    kkExecMeshMaterialsR(op->GetLink(i),kenv);
+}
+#endif
+
 void ExecSceneInput(KOp *parent,KEnvironment *kenv,sInt i)
 {
   KOp *op;
@@ -237,8 +266,19 @@ void ExecSceneInput(KOp *parent,KEnvironment *kenv,sInt i)
   if(op->Cache)
     classId = op->Cache->ClassId;
 
+#if defined(__EMSCRIPTEN__)
+  if(kkExecTrace)
+    KKLOG("[kk] sceneinput parent=%d i=%d in=%d cache=%p freed=%d result=%d cls=%d\n",
+          parent->OpId,i,op->OpId,op->Cache,op->CacheFreed,op->Result,classId);
+#endif
+
   if(classId == KC_MESH || classId == KC_MINMESH || classId == KC_EFFECT)
   {
+#if defined(__EMSCRIPTEN__)
+    extern sInt kkBetaData;
+    if(kkBetaData && classId != KC_EFFECT && !op->SkipExec)
+      kkExecMeshMaterialsR(op,kenv);
+#endif
     scene = (GenScene *)parent->Cache;
     if(scene->Childs.Count)
     {
@@ -299,6 +339,7 @@ void ExecSceneInputs(KOp *parent,KEnvironment *kenv,sF32 *srt)
 
 GenScene * __stdcall Init_Scene_Scene(GenMesh *mesh,sF323 s,sF323 r,sF323 t,sBool lightmap)
 {
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
   GenScene *scene;
 
   if(mesh==0)
@@ -306,27 +347,29 @@ GenScene * __stdcall Init_Scene_Scene(GenMesh *mesh,sF323 s,sF323 r,sF323 t,sBoo
 
   scene = MakeScene(mesh);
   if(scene)
-    sCopyMem(scene->SRT,&s.x,9*4);
+    sCopyMem(scene->SRT,s_arr,9*4);
 
   return scene;
 }
 
 void __stdcall Exec_Scene_Scene(KOp *op,KEnvironment *kenv,sF323 s,sF323 r,sF323 t,sBool lightmap)
 {
-  ExecSceneInputs(op,kenv,&s.x);
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
+  ExecSceneInputs(op,kenv,s_arr);
 }
 
 /****************************************************************************/
 
 GenScene * __stdcall Init_Scene_Add(sInt count,GenScene *s0,...)
 {
+  sVARARGS_INIT(GenScene *,s0,count);
   GenScene *scene,*add;
   sInt i;
 
   scene = new GenScene;
   for(i=0;i<count;i++)
   {
-    add = MakeScene((&s0)[i]);
+    add = MakeScene(sVARARGS(s0)[i]);
     if(add)
       *scene->Childs.Add() = add;
   }
@@ -343,6 +386,7 @@ void __stdcall Exec_Scene_Add(KOp *op,KEnvironment *kenv)
 
 GenScene * __stdcall Init_Scene_Multiply(GenScene *add,sF323 s,sF323 r,sF323 t,sInt count)
 {
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
   GenScene *scene;
 
   add = MakeScene(add);
@@ -351,19 +395,20 @@ GenScene * __stdcall Init_Scene_Multiply(GenScene *add,sF323 s,sF323 r,sF323 t,s
   scene = new GenScene;
   *scene->Childs.Add() = add;
   scene->Count = count;
-  sCopyMem(scene->SRT,&s.x,9*4);
+  sCopyMem(scene->SRT,s_arr,9*4);
 
   return scene;
 }
 
 void __stdcall Exec_Scene_Multiply(KOp *op,KEnvironment *kenv,sF323 s,sF323 r,sF323 t,sInt count)
 {
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
   sMatrix mat,mat2;
   sInt i;
   sVector save;
 
   kenv->ExecStack.Dup();
-  mat.InitSRT(&s.x);
+  mat.InitSRT(s_arr);
   save = kenv->Var[KV_SELECT];
   for(i=0;i<count;i++)
   {
@@ -386,7 +431,8 @@ GenScene * __stdcall Init_Scene_Transform(GenScene *add,sF323 s,sF323 r,sF323 t)
 
 void __stdcall Exec_Scene_Transform(KOp *op,KEnvironment *kenv,sF323 s,sF323 r,sF323 t)
 {
-  ExecSceneInputs(op,kenv,&s.x);
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
+  ExecSceneInputs(op,kenv,s_arr);
 }
 
 /****************************************************************************/
@@ -445,27 +491,36 @@ void __stdcall Exec_Scene_Light(KOp *op,KEnvironment *kenv,sF323 r,sF323 t,sU32 
 
 GenScene * __stdcall Init_Scene_Camera(sF323 s,sF323 r,sF323 t)
 {
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
   GenScene *scene;
 
   scene = new GenScene;
-  sCopyMem(scene->SRT,&s.x,9*4);
+  sCopyMem(scene->SRT,s_arr,9*4);
 
   return scene;
 }
 
+#if defined(__EMSCRIPTEN__)
+sInt kkSceneCameraCount;          // bumped whenever a Camera op sets GameCam (see Exec_IPP_Viewport)
+#endif
+
 void __stdcall Exec_Scene_Camera(KOp *op,KEnvironment *kenv,sF323 s,sF323 r,sF323 t)
 {
+#if defined(__EMSCRIPTEN__)
+  kkSceneCameraCount++;
+#endif
+  sF32 s_arr[9] = { s.x, s.y, s.z, r.x, r.y, r.z, t.x, t.y, t.z };   // was &s.x spanning 3 by-value params
   sMatrix mat;
   
 #if !sPLAYER
   if(!GenOverlayManager->LinkEdit)
   {
-    mat.InitSRT(&s.x);
+    mat.InitSRT(s_arr);
     kenv->GameCam.CameraSpace.MulA(mat,kenv->ExecStack.Top());
   }
 #else
   {
-    mat.InitSRT(&s.x);
+    mat.InitSRT(s_arr);
     kenv->GameCam.CameraSpace.MulA(mat,kenv->ExecStack.Top());
   }
 #endif
@@ -628,6 +683,7 @@ void __stdcall Exec_Scene_Walk(KOp *op,KEnvironment *kenv,
   sF32 scanup,sF32 scandown,
   KSpline *stepspline)
 {
+  const sF323 legs[8] = { l0,l1,l2,l3,l4,l5,l6,l7 };   // was (&l0)[i]: x86 stack-layout trick
   sMatrix mat;//,save;               // local vars
   sMatrix dir;                    // desired orientation of walker
   sVector savevar[8],savetime;
@@ -680,7 +736,7 @@ void __stdcall Exec_Scene_Walk(KOp *op,KEnvironment *kenv,
     mem->InitSteps = FootCount*2;
     for(i=0;i<FootCount;i++)
     {
-      mem->FootDelta[i].Init((&l0)[i].x,(&l0)[i].y,(&l0)[i].z,0);
+      mem->FootDelta[i].Init(legs[i].x,legs[i].y,legs[i].z,0);
       v.Add3(matrix.l,mem->FootDelta[i]);
       v.w = 0;
       mem->FootOld[i] = mem->FootNew[i] = v;

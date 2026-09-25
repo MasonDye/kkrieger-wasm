@@ -931,7 +931,11 @@ struct sSystem_
   void FontCharWidth(sInt ch,sInt *widths);                // get char width (with kerning)
   void FontPrint(sInt x,sInt y,const sChar *string,sInt count); // print
   void FontPrint(sInt x,sInt y,const sU16 *string,sInt count); // print
+#if defined(__EMSCRIPTEN__)
+  sU32 *FontBitmap();                                     // resolves the 2D canvas page, see wasm/_start_wasm.cpp
+#else
   sU32 *FontBitmap() { return FontMem; }                  // return font bitmap
+#endif
   void FontEnd();                                         // delete bitmap.
 
 // graphics

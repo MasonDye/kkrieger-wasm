@@ -398,3 +398,9 @@ FodyWeavers.xsd
 *.sln.iml
 
 *.swp
+
+## WebAssembly port (werkkzeug3_kkrieger/wasm): build output and debug captures
+werkkzeug3_kkrieger/wasm/obj*/
+werkkzeug3_kkrieger/wasm/dist*/
+werkkzeug3_kkrieger/wasm/shots/
+__pycache__/

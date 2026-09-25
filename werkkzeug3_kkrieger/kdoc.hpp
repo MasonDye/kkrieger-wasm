@@ -384,19 +384,43 @@ public:
 
 /****************************************************************************/
 
+// On WebAssembly the x86 CallCode trampoline is replaced by generated, typed
+// wrappers (wasm/kop_thunks.cpp), so the handler slots hold a wrapper pointer
+// instead of a raw code address. See wasm/gen_thunks.py.
+#if defined(__EMSCRIPTEN__)
+typedef KObject *(*KThunk)(sInt *para,sInt count);
+#define KHANDLERFN KThunk
+// Variadic operators (Bitmap_Merge, Material_Add, ...) read their extra inputs
+// by indexing past the last named parameter -- (&b0)[i] -- which only works
+// when all arguments sit contiguously on the x86 stack. On wasm the function
+// gathers them with va_arg into a local array first; sVARARGS_INIT() declares
+// that array and sVARARGS() names it. Works for calls through the generated
+// thunks and for direct C++ calls alike.
+#define sVARARGS_INIT(type,first,count) \
+  type first##_va[256]; \
+  { va_list va__; va_start(va__,first); first##_va[0] = first; \
+    for(sInt k__=1;k__<(count) && k__<256;k__++) first##_va[k__] = va_arg(va__,type); \
+    va_end(va__); }
+#define sVARARGS(first) (first##_va)
+#else
+#define KHANDLERFN void *
+#define sVARARGS_INIT(type,first,count) type *first##_va = &first;
+#define sVARARGS(first) (first##_va)
+#endif
+
 struct KClass                     // Operator class
 {
   sU32 Convention;                // calling convention +flag 0x10000000 (varinputs)
   sChar *Packing;                 // packing string
-  void *InitHandler;              // initialize operator
-  void *ExecHandler;              // execute operator
+  KHANDLERFN InitHandler;         // initialize operator
+  KHANDLERFN ExecHandler;         // execute operator
 }; // =16 bytes
 
 struct KHandler                   // Operator handler
 {
   sInt Id;                        // operator id
-  void *InitHandler;              // initialize operator
-  void *ExecHandler;              // execute operator
+  KHANDLERFN InitHandler;         // initialize operator
+  KHANDLERFN ExecHandler;         // execute operator
 };
 
 extern KHandler KHandlers[];
@@ -417,8 +441,8 @@ struct KOp                        // Operator
   sInt CacheCount;                // on creation set to output-count, then reduced with each link
   sInt WheelSpeed;                // used only for spinning wheels in the gui...
   KEvent *FirstEvent;             // list of active events for this operator
-  void *InitHandler;              // the actual code
-  void *ExecHandler;              // the actual code
+  KHANDLERFN InitHandler;         // the actual code
+  KHANDLERFN ExecHandler;         // the actual code
   sInt CalcError;                 // could not calculate cache
   sU32 Convention;                // calling conventions for code
   sU32 ChangeMask;                // which inputs don't update the "change" bit?

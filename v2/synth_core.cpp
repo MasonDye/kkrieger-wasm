@@ -249,7 +249,11 @@ static void dprintf(const char *fmt, ...)
   char buf[256];
   va_list arg;
   va_start(arg, fmt);
+#ifdef _MSC_VER
   vsprintf_s(buf, fmt, arg);
+#else
+  vsnprintf(buf, sizeof(buf), fmt, arg);
+#endif
   va_end(arg);
   OutputDebugStringA(buf);
 }
@@ -2678,7 +2682,7 @@ struct V2Synth
     // Ahem, so this is somewhat dubious, but we don't use
     // virtual functions or anything so it should be fine. Ahem.
     // Look away please :)
-    memset(this, 0, sizeof(this));
+    memset(this, 0, sizeof(*this));   // was sizeof(this): only 4 bytes, left stale voice/channel state behind on re-init
 
     // set sampling rate
     this->samplerate = samplerate;

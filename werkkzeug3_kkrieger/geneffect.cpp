@@ -1,6 +1,12 @@
 // This file is distributed under a BSD license. See LICENSE.txt for details.
 
 #include "geneffect.hpp"
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+extern sInt kkExecTrace;                                  // kdoc.cpp: one-frame op trace
+#define KKLOG(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); } while(0)
+#endif
+
 #include "genmaterial.hpp"
 #include "genbitmap.hpp"
 #include "genmesh.hpp"
@@ -12,7 +18,10 @@
 #include "_util.hpp"
 #include "_startdx.hpp"
 #include "fried/fried.hpp"
+#if !defined(__EMSCRIPTEN__)
 #include <xmmintrin.h>
+
+#endif
 
 extern sF32 GlobalFps;
 extern sBool IntroHighTexRes;
@@ -331,6 +340,20 @@ void __stdcall Exec_Effect_Print(KOp *op,KEnvironment *kenv,sInt flags,sF32 size
   if(!mat)
     return;
 
+#if defined(__EMSCRIPTEN__)
+  // kkrieger3383.kx predates the current flag layout: x-alignment sat in bits
+  // 0..1 (center-y in bit 2, screen space in bit 3) before it moved to bits
+  // 8..9 - "*8left|center x|right:*1|center y:*2|debug" in werkops.cpp.
+  extern sInt kkOldDataLayout, kkBetaData;
+  // the 2004 Print only looked at bit 0 (centre x, beta exe VA 0x80d7ae);
+  // the end screen sets bits 0 and 1, which the later layout reads as the
+  // unknown x-alignment 3 and prints left-aligned from the screen centre
+  if(kkBetaData)
+    flags &= ~2;
+  if(kkOldDataLayout)
+    flags = ((flags & 3) << 8) | ((flags & 4) >> 1) | ((flags & 8) >> 1) | (flags & 0x70);
+#endif
+
   if(mat->Passes.Count>0)
   {
     pi.KEnv = kenv;
@@ -418,8 +441,14 @@ void __stdcall Exec_Effect_Print(KOp *op,KEnvironment *kenv,sInt flags,sF32 size
             break;
           case 'W':
             val = kenv->Game->Player.Ammo[(kenv->Game->Player.CurrentWeapon/2)&3];
+#if defined(__EMSCRIPTEN__)
+            { extern sInt kkBetaData;          // the 2004 first weapon had finite ammo
+              if(kenv->Game->Player.CurrentWeapon==0 && !kkBetaData)
+                inf = 1; }
+#else
             if(kenv->Game->Player.CurrentWeapon==0)
               inf = 1;
+#endif
             break;
 #if sPLAYER
           case 'f':
@@ -542,6 +571,21 @@ void __stdcall Exec_Effect_Print(KOp *op,KEnvironment *kenv,sInt flags,sF32 size
         text++;
       }
     }
+#if defined(__EMSCRIPTEN__)
+    {
+      static sU32 seen[64]; static sInt seenCount = 0;
+      sBool isNew = sTRUE;
+      for(sInt si=0;si<seenCount;si++) if(seen[si] == (sU32)flags) isNew = sFALSE;
+      if(isNew && seenCount < 64) seen[seenCount++] = flags;
+      if(isNew || kkExecTrace)
+        KKLOG("[kk] print page=%d count=%d flags=%x size=%.3f,%.3f width=%.3f | cam l=(%.2f %.2f %.2f) k=(%.2f %.2f %.2f) zoom=%.3f,%.3f center=%.3f,%.3f clip=%.2f..%.2f ortho=%d model l=(%.2f %.2f %.2f) i.x=%.2f\n",
+              pi.Page,pi.Count,flags,sizex,sizey,pi.Width((sChar *)"exit"),
+              env.CameraSpace.l.x,env.CameraSpace.l.y,env.CameraSpace.l.z,
+              env.CameraSpace.k.x,env.CameraSpace.k.y,env.CameraSpace.k.z,
+              env.ZoomX,env.ZoomY,env.CenterX,env.CenterY,env.NearClip,env.FarClip,env.Orthogonal,
+              env.ModelSpace.l.x,env.ModelSpace.l.y,env.ModelSpace.l.z,env.ModelSpace.i.x);
+    }
+#endif
     sSystem->GeoEnd(geo,pi.Count*4,pi.Count*6);
     sSystem->GeoDraw(geo);
     sSystem->GeoRem(geo);

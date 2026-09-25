@@ -1897,10 +1897,11 @@ GenMinMesh * __stdcall MinMesh_MatLinkId(GenMinMesh *mesh,GenMaterial *mtrl,sInt
 
 GenMinMesh * __stdcall MinMesh_Add(sInt count,GenMinMesh *mesh,...)
 {
+  sVARARGS_INIT(GenMinMesh *,mesh,count);
   if(CheckMinMesh(mesh)) return 0;
   for(sInt i=1;i<count;i++)
   {
-    GenMinMesh *b = (&mesh)[i];
+    GenMinMesh *b = sVARARGS(mesh)[i];
     mesh->Add(b);
     b->Release();
   }
@@ -2110,7 +2111,9 @@ GenMinMesh * __stdcall MinMesh_Perlin(GenMinMesh *mesh,sInt mask,sFSRT srt,sF323
 
   // setup fpu: single precision, round towards neg. infinity
 
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+  (void)oldcw;   // wasm has no x87 control word; the sFtol below floors explicitly
+#elif defined(__GNUC__)
   sInt cw = 0x143f;
   asm (
     "fstcw   %0\n\t"
@@ -2143,7 +2146,13 @@ GenMinMesh * __stdcall MinMesh_Perlin(GenMinMesh *mesh,sInt mask,sFSRT srt,sF323
       t0.Rotate34(mat,pos);
       for(sInt j=0;j<3;j++)
       {
+#if defined(__EMSCRIPTEN__)
+        // the original relies on the x87 control word set above (round towards
+        // negative infinity), so fistp behaves as floor(). Say so explicitly.
+        is[j] = (sInt)__builtin_floorf(t0[j]);
+#else
         is[j] = sFtol(t0[j]);   // integer coordinate
+#endif
         fs[j] = t0[j] - is[j];  // fractional part
         is[j] &= 255;           // integer grid wraps round 256
         fs[j] = fs[j]*fs[j]*fs[j]*(10.0f+fs[j]*(6.0f*fs[j]-15.0f));
@@ -2177,7 +2186,9 @@ GenMinMesh * __stdcall MinMesh_Perlin(GenMinMesh *mesh,sInt mask,sFSRT srt,sF323
 	}
 
   // restore fpu state
-#ifdef __GNUC__
+#if defined(__EMSCRIPTEN__)
+  // nothing to restore
+#elif defined(__GNUC__)
   asm (
     "fldcw   %0\n\t"
     : : "m" (oldcw)
@@ -2211,6 +2222,7 @@ GenMinMesh * __stdcall MinMesh_ExtrudeNormal(GenMinMesh *mesh,sInt mask,sF32 dis
 
 GenMinMesh * __stdcall MinMesh_Bend2(GenMinMesh *mesh,sF323 center,sF323 rotate,sF32 len,sF32 angle)
 {
+  sF32 rotate_arr[3] = { rotate.x, rotate.y, rotate.z };   // was &rotate.x spanning 1 by-value params
   sMatrix mt,mb;
   sVector vt;
   sF32 vx,vy,t,sa,ca;
@@ -2218,7 +2230,7 @@ GenMinMesh * __stdcall MinMesh_Bend2(GenMinMesh *mesh,sF323 center,sF323 rotate,
 
   if(CheckMinMesh(mesh)) return 0;
 
-  mt.InitEulerPI2(&rotate.x);
+  mt.InitEulerPI2(rotate_arr);
   mt.l.x = -center.x;
   mt.l.y = -center.y;
   mt.l.z = -center.z;
@@ -4096,6 +4108,7 @@ GenMinMesh * __stdcall MinMesh_Pipe(GenSpline *spline_,GenMinMesh *mesh0,GenMinM
 
 GenMinMesh * __stdcall MinMesh_Multiply(KOp *,GenMinMesh *mesh,sFSRT srt,sInt count,sInt mode,sF32 tu,sF32 tv,sF323 lrot,sF32 extrude)
 {
+  sF32 lrot_arr[3] = { lrot.x, lrot.y, lrot.z };   // was &lrot.x spanning 1 by-value params
 	GenMinMesh *out;
 	sMatrix xform,step,lxform,lstep,tmp;
   sVector p;
@@ -4103,7 +4116,7 @@ GenMinMesh * __stdcall MinMesh_Multiply(KOp *,GenMinMesh *mesh,sFSRT srt,sInt co
   if(CheckMinMesh(mesh)) return 0;
 
 	step.InitSRT(srt.v);
-  lstep.InitEulerPI2(&lrot.x);
+  lstep.InitEulerPI2(lrot_arr);
 	out = new GenMinMesh;
 	xform.Init();
   lxform.Init();
@@ -4160,6 +4173,7 @@ GenMinMesh * __stdcall MinMesh_Multiply(KOp *,GenMinMesh *mesh,sFSRT srt,sInt co
 
 GenMinMesh * __stdcall MinMesh_Multiply2(sInt seed,sInt3 count1,sF323 translate1,sInt3 count2,sF323 translate2,sInt random,sInt3 count3,sF323 translate3,sInt inCount,GenMinMesh *inMesh,...)
 {
+  sVARARGS_INIT(GenMinMesh *,inMesh,inCount);
   if(!inCount)
     return 0;
 
@@ -4199,7 +4213,7 @@ GenMinMesh * __stdcall MinMesh_Multiply2(sInt seed,sInt3 count1,sF323 translate1
                   {
                     start = mesh->Vertices.Count;
 
-                    GenMinMesh *in = (&inMesh)[sMin<sInt>(sGetRnd(inCount+random),inCount-1)];
+                    GenMinMesh *in = sVARARGS(inMesh)[sMin<sInt>(sGetRnd(inCount+random),inCount-1)];
                     mesh->Add(in);
 
                     xform.l.x = x1 * translate1.x + x2 * translate2.x + x3 * translate3.x;
@@ -4225,7 +4239,7 @@ GenMinMesh * __stdcall MinMesh_Multiply2(sInt seed,sInt3 count1,sF323 translate1
   }
 
   for(sInt i=0;i<inCount;i++)
-    (&inMesh)[i]->Release();
+    sVARARGS(inMesh)[i]->Release();
 
   return mesh;
 }

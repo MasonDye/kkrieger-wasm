@@ -12,6 +12,30 @@
 #define RONAN
 #define V2MPLAYER_SYNC_FUNCTIONS
 
+#if defined(__EMSCRIPTEN__)
+
+// WebAssembly: the 2004 player + _viruz2a.asm are replaced by the portable
+// V2 core in ../v2 (synth_core.cpp / v2mplayer.cpp / v2mconv.cpp), reached
+// through the C bridge in wasm/v2_bridge.cpp. Only the surface mainplayer.cpp
+// uses is kept.
+class CV2MPlayer
+{
+public:
+  CV2MPlayer();
+  ~CV2MPlayer();
+
+  sBool Open (const void *a_v2mptr, sU32 a_samplerate=44100);
+  void  Close ();
+  void  Play (sU32 a_time=0);
+  void  Stop (sU32 a_fadetime=0);
+  sBool Render (sF32 *a_buffer, sU32 a_len);
+
+private:
+  void *m_impl;                   // opaque handle owned by wasm/v2_bridge.cpp
+};
+
+#else // !__EMSCRIPTEN__
+
 class CV2MPlayer
 {
 public:
@@ -212,12 +236,14 @@ private:
 	void  Tick();                       // one midi player tick
 };
 
+#endif // !__EMSCRIPTEN__
+
 /****************************************************************************/
 /****************************************************************************/
 
 
 #if sLINK_VIRUZ2
-#if !sINTRO
+#if !sINTRO && !defined(__EMSCRIPTEN__)
 class sViruz2 : public sMusicPlayer
 {
   CV2MPlayer Viruz;
